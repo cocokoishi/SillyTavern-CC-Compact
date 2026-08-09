@@ -37,7 +37,7 @@ Requires **SillyTavern 1.18.0 or newer**.
 3. Paste:
 
    ```text
-   https://github.com/cocokoishi/Compact
+   https://github.com/cocokoishi/SillyTavern-CC-Compact
    ```
 
 4. Install it. Reload SillyTavern if the extension panel does not appear immediately.
