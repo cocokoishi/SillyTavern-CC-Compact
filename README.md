@@ -1,5 +1,8 @@
 # CC Compact for SillyTavern
 
+> **v1.1.1 correctness fix:** compacted memory is injected as an in-chat SYSTEM message at the exact boundary before the retained recent tail. Automatic thresholding now counts active chat tokens instead of confusing SillyTavern's interceptor max-context argument with current usage. The trigger turn's already-snapshotted history is pruned too, and refusal/empty summaries fail closed without hiding source messages.
+
+
 A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
 
 **Default behavior:** when the prompt for the next generation reaches **250,000 tokens**, Compact folds old chat history into a dense persistent summary, keeps a recent tail verbatim, removes the folded source messages from the model prompt without deleting them from the chat, and then lets the original generation continue.

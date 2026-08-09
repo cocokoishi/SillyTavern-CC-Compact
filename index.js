@@ -188,7 +188,7 @@ function interpolatePrompt(prompt, targetTokens) {
         .replaceAll('{{target_words}}', String(Math.max(1, Math.round(targetTokens * 0.72))));
 }
 
-function syncSummaryInjection() {
+function syncSummaryInjection(activeChat = null) {
     const state = getChatState(false);
     const settings = getEffectiveSettings();
     const summary = String(state?.summary || '').trim();
@@ -196,9 +196,48 @@ function syncSummaryInjection() {
         ? settings.injectionTemplate.replaceAll('{{summary}}', summary)
         : '';
 
-    // IN_PROMPT + SYSTEM mirrors SillyTavern's built-in Summary extension behavior,
-    // while the actual folded source messages remain in the chat file with is_system=true.
-    setExtensionPrompt(PROMPT_ID, value, extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
+    // A compacted state is replacement history, not a generic top-level instruction.
+    // Inject it as a real SYSTEM message immediately before the active (uncompacted)
+    // chat tail. Depth 0 is the newest message; therefore active-message count puts
+    // the compact state at the oldest edge of the retained working set.
+    const activeDepth = Array.isArray(activeChat)
+        ? activeChat.filter(message => message && !message.is_system && String(message.mes || '').trim()).length
+        : visibleEntries().length;
+    const depth = Math.min(10000, Math.max(0, activeDepth));
+    setExtensionPrompt(PROMPT_ID, value, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
+}
+
+async function estimateActiveContextTokens(activeChat, previousSummary = '') {
+    const transcript = (Array.isArray(activeChat) ? activeChat : [])
+        .filter(message => message && !message.is_system && String(message.mes || '').trim())
+        .map((message, index) => transcriptEntry(message, index))
+        .join('\n\n');
+    const summary = String(previousSummary || '').trim();
+    const combined = summary
+        ? `PREVIOUS COMPACTED CONTEXT:\n${summary}\n\nACTIVE CHAT:\n${transcript}`
+        : transcript;
+    return await countTokens(combined);
+}
+
+async function validateCompactedSummary(summary, sourceText) {
+    const value = String(summary || '').trim();
+    if (!value) throw new Error('The model returned an empty compacted context. Original messages were not hidden.');
+
+    const [summaryTokens, sourceTokens] = await Promise.all([countTokens(value), countTokens(sourceText)]);
+    const refusalPatterns = [
+        /(?:当前|本轮|这段|上述).{0,30}(?:没有|不存在|未提供|看不到).{0,30}(?:上下文|对话|内容|文本|原文)/i,
+        /请.{0,30}(?:重新发送|补充|提供).{0,30}(?:原文|内容|文本|上下文)/i,
+        /I\s+(?:do\s+not|don't|cannot|can't)\s+(?:have|see|access).{0,50}(?:context|conversation|text|content)/i,
+        /(?:not present|not available|does not exist).{0,50}(?:context|conversation|history)/i,
+    ];
+
+    if (refusalPatterns.some(pattern => pattern.test(value))) {
+        throw new Error('The model answered as if the transcript were missing instead of compacting it. Original messages were not hidden.');
+    }
+    if (sourceTokens >= 2000 && summaryTokens < 64) {
+        throw new Error(`The compacted context is implausibly short (${summaryTokens} tokens for ~${sourceTokens} source tokens). Original messages were not hidden.`);
+    }
+    return { summaryTokens, sourceTokens };
 }
 
 function decorateMessages() {
@@ -348,14 +387,19 @@ async function generateCompactedSummary(previousSummary, foldEntries, settings) 
 
     for (let i = 0; i < chunks.length; i++) {
         const previous = running ? `PREVIOUS COMPACTED CONTEXT:\n${running}` : 'PREVIOUS COMPACTED CONTEXT:\n(none)';
-        const prompt = `${previous}\n\nNEW TRANSCRIPT TO FOLD IN (chunk ${i + 1}/${chunks.length}):\n${chunks[i]}`;
+        const sourceText = chunks[i];
+        const prompt = [
+            { role: 'system', content: previous },
+            { role: 'user', content: `NEW TRANSCRIPT TO FOLD IN (chunk ${i + 1}/${chunks.length}):\n${sourceText}` },
+        ];
         const raw = await context.generateRaw({
             prompt,
             systemPrompt,
             responseLength: settings.summaryTargetTokens,
+            trimNames: false,
         });
         running = removeReasoningFromString(String(raw || '')).trim();
-        if (!running) throw new Error(`The model returned an empty compacted context at chunk ${i + 1}/${chunks.length}.`);
+        await validateCompactedSummary(running, sourceText);
     }
 
     // If the backend ignored the requested response length, perform one bounded
@@ -522,31 +566,49 @@ async function statusText() {
     const state = getChatState(false);
     const summaryTokens = state?.summary ? await countTokens(state.summary) : 0;
     const hidden = hiddenByCompactCount();
-    return `Compact: auto=${settings.autoEnabled ? 'on' : 'off'}, threshold=${settings.thresholdTokens}, hidden=${hidden}, summary≈${summaryTokens} tokens, compactions=${state?.compactionCount || 0}, last=${state?.lastTrigger || 'never'}.`;
+    return `CC Compact: auto=${settings.autoEnabled ? 'on' : 'off'}, threshold=${settings.thresholdTokens}, hidden=${hidden}, summary≈${summaryTokens} tokens, compactions=${state?.compactionCount || 0}, last=${state?.lastTrigger || 'never'}.`;
 }
 
-// SillyTavern calls this global function before non-dry-run prompt construction.
-// contextSize is the token count for the upcoming generation.
-globalThis.CompactGenerationInterceptor = async function CompactGenerationInterceptor(chat, contextSize, _abort, type) {
+// SillyTavern calls this before it finishes assembling the outgoing prompt.
+// IMPORTANT: the second argument is the *maximum prompt budget*, not current usage.
+// We therefore count the active chat ourselves for the configurable auto threshold.
+globalThis.CompactGenerationInterceptor = async function CompactGenerationInterceptor(chat, _maxPromptTokens, _abort, type) {
     if (inCompaction || type === 'quiet') return;
 
+    // Re-anchor an existing compact state before every generation so it always sits
+    // immediately before the retained/new chat tail, even as that tail grows.
+    syncSummaryInjection(chat);
+
     const settings = getEffectiveSettings();
-    if (!settings.autoEnabled || !Number.isFinite(contextSize) || contextSize < settings.thresholdTokens) return;
+    if (!settings.autoEnabled) return;
 
     const state = getChatState(true);
-    const visibleCount = visibleEntries(chat).length;
+    const activeTokens = await estimateActiveContextTokens(chat, state.summary);
+    if (activeTokens < settings.thresholdTokens) return;
+
+    const visibleCount = Array.isArray(chat) ? chat.length : 0;
     const minimumGrowth = settings.minNewMessagesBetweenAutoCompacts;
 
     // These guards are deliberately conservative. They prevent a bad/verbose summary
-    // from causing the same generation to fall into a Codex-like repeated compact loop.
+    // from causing the same generation to fall into a repeated compact loop.
     if (state.autoSnoozeUntilVisibleCount && visibleCount < state.autoSnoozeUntilVisibleCount) return;
     if (state.lastAutoVisibleCount && visibleCount < state.lastAutoVisibleCount + minimumGrowth) return;
 
-    const result = await compactContext('automatic', { tokensBefore: contextSize });
+    const result = await compactContext('automatic', { tokensBefore: activeTokens });
     if (!result.success) {
         state.autoSnoozeUntilVisibleCount = visibleCount + minimumGrowth;
         if (SillyTavern.getContext().saveMetadata) await SillyTavern.getContext().saveMetadata();
+        return;
     }
+
+    // Generate() snapshots coreChat before interceptors run. Remove newly folded entries
+    // from that snapshot too, otherwise the trigger turn would still send the old history.
+    if (Array.isArray(chat)) {
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i]?.extra?.compact_hidden) chat.splice(i, 1);
+        }
+    }
+    syncSummaryInjection(chat);
 };
 
 function setDisabledState() {
