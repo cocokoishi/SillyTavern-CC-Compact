@@ -1,0 +1,15 @@
+{
+  "display_name": "Compact",
+  "loading_order": 90,
+  "requires": [],
+  "optional": [],
+  "dependencies": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "cocokoishi",
+  "version": "1.0.0",
+  "homePage": "https://github.com/cocokoishi/Compact",
+  "auto_update": true,
+  "minimum_client_version": "1.18.0",
+  "generate_interceptor": "CompactGenerationInterceptor"
+}

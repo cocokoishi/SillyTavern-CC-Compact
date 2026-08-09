@@ -1,0 +1,99 @@
+.compact-settings .inline-drawer-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.compact-row,
+.compact-actions,
+.compact-chat-heading {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.compact-row-checks {
+    justify-content: space-between;
+}
+
+.compact-chat-heading {
+    justify-content: space-between;
+}
+
+.compact-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem 0.75rem;
+}
+
+.compact-grid > label {
+    min-width: 0;
+}
+
+.compact-grid .text_pole {
+    width: 100%;
+}
+
+.textarea_compact {
+    width: 100%;
+    resize: vertical;
+    font-family: var(--monoFontFamily, monospace);
+    line-height: 1.35;
+}
+
+.compact-muted {
+    opacity: 0.72;
+}
+
+.compact-disabled-group.compact-disabled,
+.compact-disabled-group.compact-disabled textarea,
+.compact-disabled-group.compact-disabled input {
+    opacity: 0.58;
+}
+
+/* Codex-like compact event shown in the chat timeline. */
+#chat .mes.compact-marker {
+    min-height: 0 !important;
+    padding-top: 0.35rem !important;
+    padding-bottom: 0.35rem !important;
+    margin-top: 0.35rem;
+    margin-bottom: 0.35rem;
+    background: transparent !important;
+    box-shadow: none !important;
+    border-top: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+    opacity: 0.72 !important;
+}
+
+#chat .mes.compact-marker .avatar,
+#chat .mes.compact-marker .ch_name,
+#chat .mes.compact-marker .mes_buttons,
+#chat .mes.compact-marker .mesIDDisplay,
+#chat .mes.compact-marker .timestamp {
+    display: none !important;
+}
+
+#chat .mes.compact-marker .mes_block {
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+#chat .mes.compact-marker .mes_text {
+    text-align: center;
+    font-size: 0.9em;
+    font-style: italic;
+    padding: 0.1rem 0 !important;
+}
+
+/* Messages compacted by this extension remain readable in the visible timeline. */
+#chat .mes.compact-hidden-history {
+    opacity: 1 !important;
+    filter: none !important;
+}
+
+@media (max-width: 700px) {
+    .compact-grid {
+        grid-template-columns: 1fr;
+    }
+}
