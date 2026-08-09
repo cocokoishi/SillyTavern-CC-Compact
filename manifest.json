@@ -1,5 +1,5 @@
 {
-  "display_name": "Compact",
+  "display_name": "CC Compact",
   "loading_order": 90,
   "requires": [],
   "optional": [],
@@ -7,8 +7,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "cocokoishi",
-  "version": "1.0.0",
-  "homePage": "https://github.com/cocokoishi/Compact",
+  "version": "1.1.0",
+  "homePage": "https://github.com/cocokoishi/SillyTavern-CC-Compact",
   "auto_update": true,
   "minimum_client_version": "1.18.0",
   "generate_interceptor": "CompactGenerationInterceptor"

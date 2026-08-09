@@ -1,6 +1,6 @@
-# Compact for SillyTavern
+# CC Compact for SillyTavern
 
-A CC-style context compaction extension for SillyTavern.
+A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
 
 **Default behavior:** when the prompt for the next generation reaches **250,000 tokens**, Compact folds old chat history into a dense persistent summary, keeps a recent tail verbatim, removes the folded source messages from the model prompt without deleting them from the chat, and then lets the original generation continue.
 
@@ -68,14 +68,18 @@ This means the old messages no longer consume model context after a successful c
 | Keep recent | `24000` tokens | Approximate amount of newest visible chat kept verbatim. |
 | Summary target | `8192` tokens | Maximum requested output length for each compaction pass. |
 | Max input / summary request | `160000` tokens | Upper bound for transcript material sent in one chunk; Compact also clamps this to the active model context. |
+| Min new messages before re-compact | `3` | Anti-loop guard: after an automatic compact, require this many new visible messages before another automatic compact. |
 | Compaction prompt | Built in | Instructions used to build the dense continuation state. Fully editable. |
-| Show marker | On | Add CC-style compaction events to the chat timeline. |
+| Summary injection template | Built in | Advanced template used to inject the persistent compacted state. Must contain `{{summary}}`. |
+| Show marker | On | Add compact event markers to the chat timeline. |
 
 ### Per chat
 
 Enable **Use per-chat settings** to override threshold, recent-tail size, summary target, max input, and compaction prompt for only the current chat. These values travel with that chat's metadata.
 
 The **Current compacted context** box is also per-chat and editable. Editing it immediately changes the compacted context injected on the next generation.
+
+All of these controls are available from **Extensions → CC Compact**. The panel also includes **Compact now**, **Reset chat compaction**, prompt/default reset buttons, and a per-chat status line showing hidden-message count, summary token estimate, trigger type, and last compact time.
 
 ## Manual compaction
 

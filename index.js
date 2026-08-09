@@ -9,8 +9,8 @@ import { ARGUMENT_TYPE, SlashCommandArgument } from '../../../slash-commands/Sla
 const MODULE_KEY = 'compact';
 const CHAT_KEY = 'compact_v1';
 const PROMPT_ID = 'compact_context';
-const TEMPLATE_PATH = 'third-party/Compact';
-const LOG_PREFIX = '[Compact]';
+const TEMPLATE_PATH = 'third-party/SillyTavern-CC-Compact';
+const LOG_PREFIX = '[CC Compact]';
 
 const DEFAULT_PROMPT = `You are compacting a long SillyTavern conversation into a dense continuation state.
 
@@ -137,7 +137,9 @@ function getEffectiveSettings() {
         maxInputTokens: clampNumber(source.maxInputTokens, 4096, 4000000, DEFAULT_SETTINGS.maxInputTokens),
         minNewMessagesBetweenAutoCompacts: clampNumber(global.minNewMessagesBetweenAutoCompacts, 1, 100, DEFAULT_SETTINGS.minNewMessagesBetweenAutoCompacts),
         prompt: String(source.prompt || DEFAULT_PROMPT),
-        injectionTemplate: String(global.injectionTemplate || DEFAULT_INJECTION_TEMPLATE),
+        injectionTemplate: String(global.injectionTemplate || DEFAULT_INJECTION_TEMPLATE).includes('{{summary}}')
+            ? String(global.injectionTemplate)
+            : DEFAULT_INJECTION_TEMPLATE,
     };
 }
 
@@ -419,7 +421,7 @@ async function compactContext(trigger = 'manual', options = {}) {
         const message = entries.length <= 2
             ? 'Nothing to compact yet. At least three visible messages are required.'
             : 'Nothing is old enough to compact with the current “Keep recent” setting.';
-        if (manual) toastr.info(message, 'Compact');
+        if (manual) toastr.info(message, 'CC Compact');
         return { success: false, reason: 'nothing-to-fold', message };
     }
 
@@ -429,11 +431,11 @@ async function compactContext(trigger = 'manual', options = {}) {
         if (context.loader?.show) {
             loaderHandle = context.loader.show({
                 message: trigger === 'automatic' ? 'Automatically compacting context…' : 'Compacting context…',
-                title: 'Compact',
+                title: 'CC Compact',
                 toastMode: 'static',
             });
         } else if (manual) {
-            toastr.info('Compacting context…', 'Compact');
+            toastr.info('Compacting context…', 'CC Compact');
         }
 
         const summary = await generateCompactedSummary(state.summary, fold, settings);
@@ -472,11 +474,11 @@ async function compactContext(trigger = 'manual', options = {}) {
             generation,
         };
         console.info(`${LOG_PREFIX} ${trigger} compaction complete`, result);
-        if (manual) toastr.success(`Folded ${fold.length} messages into ~${summaryTokens.toLocaleString()} tokens.`, 'Compact');
+        if (manual) toastr.success(`Folded ${fold.length} messages into ~${summaryTokens.toLocaleString()} tokens.`, 'CC Compact');
         return result;
     } catch (error) {
         console.error(`${LOG_PREFIX} Compaction failed`, error);
-        toastr.error(String(error?.message || error), 'Compact failed');
+        toastr.error(String(error?.message || error), 'CC Compact failed');
         return { success: false, reason: 'error', message: String(error?.message || error) };
     } finally {
         inCompaction = false;
@@ -511,7 +513,7 @@ async function resetCurrentChat() {
     await persistStateAndChat({ metadata: true, chat: true });
     decorateMessages();
     updateChatUi();
-    toastr.success(`Restored ${restored} message${restored === 1 ? '' : 's'} to model context.`, 'Compact reset');
+    toastr.success(`Restored ${restored} message${restored === 1 ? '' : 's'} to model context.`, 'CC Compact reset');
     return restored;
 }
 
@@ -561,7 +563,9 @@ function loadGlobalUi() {
     $('#compact-keep-recent').val(settings.keepRecentTokens);
     $('#compact-summary-target').val(settings.summaryTargetTokens);
     $('#compact-max-input').val(settings.maxInputTokens);
+    $('#compact-min-new-messages').val(settings.minNewMessagesBetweenAutoCompacts);
     $('#compact-prompt').val(settings.prompt);
+    $('#compact-injection-template').val(settings.injectionTemplate);
 }
 
 async function updateChatUi() {
@@ -616,6 +620,7 @@ function bindSettingsUi() {
         ['#compact-keep-recent', 'keepRecentTokens'],
         ['#compact-summary-target', 'summaryTargetTokens'],
         ['#compact-max-input', 'maxInputTokens'],
+        ['#compact-min-new-messages', 'minNewMessagesBetweenAutoCompacts'],
     ];
     for (const [selector, key] of globalNumberBindings) {
         $(selector).off('.compact').on('change.compact', function () {
@@ -628,10 +633,37 @@ function bindSettingsUi() {
         getSettings().prompt = String($(this).val());
         saveGlobal();
     }));
+    $('#compact-injection-template').off('.compact').on('input.compact', debounce(function () {
+        const value = String($(this).val());
+        getSettings().injectionTemplate = value;
+        const valid = value.includes('{{summary}}');
+        $(this).toggleClass('compact-invalid', !valid);
+        syncSummaryInjection();
+        saveGlobal();
+    }));
+    $('#compact-injection-template').off('change.compactValidation').on('change.compactValidation', function () {
+        if (!String($(this).val()).includes('{{summary}}')) {
+            toastr.warning('Injection template must contain {{summary}}. The default template will be used until this is fixed.', 'CC Compact');
+        }
+    });
     $('#compact-restore-prompt').off('.compact').on('click.compact', () => {
         getSettings().prompt = DEFAULT_PROMPT;
         $('#compact-prompt').val(DEFAULT_PROMPT);
         saveGlobal();
+    });
+    $('#compact-restore-injection').off('.compact').on('click.compact', () => {
+        getSettings().injectionTemplate = DEFAULT_INJECTION_TEMPLATE;
+        $('#compact-injection-template').val(DEFAULT_INJECTION_TEMPLATE);
+        syncSummaryInjection();
+        saveGlobal();
+    });
+    $('#compact-restore-all').off('.compact').on('click.compact', () => {
+        const settings = getSettings();
+        Object.assign(settings, clone(DEFAULT_SETTINGS));
+        loadGlobalUi();
+        syncSummaryInjection();
+        saveGlobal();
+        toastr.success('Global Compact settings restored to defaults.', 'CC Compact');
     });
 
     $('#compact-chat-override-enabled').off('.compact').on('change.compact', async function () {
@@ -684,7 +716,7 @@ function registerSlashCommands() {
             const action = String(value || '').trim().toLowerCase();
             if (action === 'status') {
                 const text = await statusText();
-                toastr.info(text, 'Compact');
+                toastr.info(text, 'CC Compact');
                 return text;
             }
             if (action === 'reset') {
@@ -693,7 +725,7 @@ function registerSlashCommands() {
             }
             if (action && action !== 'now') {
                 const text = 'Usage: /compact, /compact status, or /compact reset';
-                toastr.warning(text, 'Compact');
+                toastr.warning(text, 'CC Compact');
                 return text;
             }
 
@@ -716,7 +748,10 @@ async function initialize() {
 
     getSettings();
     const html = await renderExtensionTemplateAsync(TEMPLATE_PATH, 'settings');
-    const container = $('#extensions_settings2');
+    const container = $('#extensions_settings2, #extensions_settings').first();
+    if (!container.length) {
+        throw new Error('SillyTavern extension settings container was not found.');
+    }
     if (!$('#compact-settings').length) container.append(html);
 
     loadGlobalUi();
@@ -747,6 +782,6 @@ jQuery(async () => {
         await initialize();
     } catch (error) {
         console.error(`${LOG_PREFIX} Initialization failed`, error);
-        toastr.error(String(error?.message || error), 'Compact extension failed to load');
+        toastr.error(String(error?.message || error), 'CC Compact extension failed to load');
     }
 });

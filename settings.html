@@ -1,7 +1,7 @@
 <div id="compact-settings" class="compact-settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>Compact</b>
+            <b>CC Compact</b>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -12,7 +12,7 @@
                 </label>
                 <label class="checkbox_label" for="compact-show-marker">
                     <input id="compact-show-marker" type="checkbox">
-                    <span>Show Codex-style marker</span>
+                    <span>Show compact event marker</span>
                 </label>
             </div>
 
@@ -33,6 +33,10 @@
                     <span>Max input / summary request</span>
                     <input id="compact-max-input" class="text_pole" type="number" min="4096" step="4096">
                 </label>
+                <label>
+                    <span>Min new messages before re-compact</span>
+                    <input id="compact-min-new-messages" class="text_pole" type="number" min="1" max="100" step="1">
+                </label>
             </div>
 
             <label for="compact-prompt"><b>Compaction prompt</b></label>
@@ -40,6 +44,17 @@
             <div class="compact-actions">
                 <button id="compact-restore-prompt" class="menu_button">Restore default prompt</button>
             </div>
+
+            <details class="compact-advanced">
+                <summary><b>Advanced injection settings</b></summary>
+                <label for="compact-injection-template">Summary injection template</label>
+                <textarea id="compact-injection-template" class="text_pole textarea_compact" rows="5"></textarea>
+                <small class="compact-muted">Must contain <code>{{summary}}</code>. This controls how the persistent compacted state is injected into future prompts.</small>
+                <div class="compact-actions">
+                    <button id="compact-restore-injection" class="menu_button">Restore injection template</button>
+                    <button id="compact-restore-all" class="menu_button">Restore all global defaults</button>
+                </div>
+            </details>
 
             <hr>
             <div class="compact-chat-heading">
