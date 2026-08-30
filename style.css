@@ -141,11 +141,45 @@
     gap: 0.65rem;
 }
 
+.cc-goal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: rgb(0 0 0 / 62%);
+    backdrop-filter: blur(3px);
+}
+
+.cc-goal-dialog {
+    position: relative;
+    width: min(900px, 96vw);
+    max-height: 92vh;
+    overflow: auto;
+    padding: 1rem;
+    color: var(--SmartThemeBodyColor, inherit);
+    background: var(--SmartThemeBlurTintColor, #202020);
+    border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+    border-radius: 0.7rem;
+    box-shadow: 0 1rem 3rem rgb(0 0 0 / 45%);
+}
+
+.cc-goal-close {
+    position: absolute;
+    top: 0.55rem;
+    right: 0.55rem;
+    z-index: 1;
+    min-width: 2.2rem;
+}
+
 .cc-goal-panel {
     display: flex;
     flex-direction: column;
     gap: 0.85rem;
     min-width: 0;
+    padding-right: 2.5rem;
 }
 
 .cc-goal-intro h3,
@@ -237,5 +271,15 @@
 @media (max-width: 700px) {
     .cc-goal-mode-list {
         grid-template-columns: 1fr;
+    }
+
+    .cc-goal-overlay {
+        align-items: stretch;
+        padding: 0.4rem;
+    }
+
+    .cc-goal-dialog {
+        width: 100%;
+        max-height: 100%;
     }
 }

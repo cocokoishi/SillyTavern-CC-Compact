@@ -7,7 +7,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "cocokoishi",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "homePage": "https://github.com/cocokoishi/SillyTavern-CC-Compact",
   "auto_update": true,
   "minimum_client_version": "1.18.0",

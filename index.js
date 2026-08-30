@@ -1,6 +1,5 @@
 import { Generate, extension_prompt_roles, extension_prompt_types, getMaxPromptTokens, setExtensionPrompt } from '../../../../script.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
-import { POPUP_RESULT, POPUP_TYPE, Popup } from '../../../popup.js';
 import { getTokenCountAsync } from '../../../tokenizers.js';
 import { removeReasoningFromString } from '../../../reasoning.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
@@ -976,16 +975,21 @@ async function runGoalAction(actionSettings, previewPrompt = '') {
 }
 
 function openGoalPopup() {
-    if (activeGoalPopup?.dlg?.isConnected) {
-        activeGoalPopup.dlg.focus();
+    if (activeGoalPopup?.isConnected) {
+        activeGoalPopup.querySelector('#cc-goal-run')?.focus();
         return;
     }
 
     const settings = getGoalSettings();
-    const content = $(`
-        <div class="cc-goal-panel">
+    const overlay = $(`
+        <div class="cc-goal-overlay" role="presentation">
+            <div class="cc-goal-dialog" role="dialog" aria-modal="true" aria-labelledby="cc-goal-title">
+                <button class="cc-goal-close menu_button" type="button" aria-label="Close Goal">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+                <div class="cc-goal-panel">
             <div class="cc-goal-intro">
-                <h3><i class="fa-solid fa-bullseye"></i> Goal</h3>
+                <h3 id="cc-goal-title"><i class="fa-solid fa-bullseye"></i> Goal</h3>
                 <p>Choose how to create the next user message. All fields below are saved globally.</p>
             </div>
             <div class="cc-goal-mode-list" role="radiogroup" aria-label="Goal mode">
@@ -1038,21 +1042,17 @@ function openGoalPopup() {
                     <i class="fa-solid fa-play"></i><span>Run Goal</span>
                 </button>
             </div>
+                </div>
+            </div>
         </div>
     `);
-
-    const popup = new Popup(content, POPUP_TYPE.TEXT, '', {
-        wide: true,
-        large: true,
-        allowVerticalScrolling: true,
-        leftAlign: true,
-        okButton: 'Close',
-        cancelButton: false,
-        onClose: () => {
-            if (activeGoalPopup === popup) activeGoalPopup = null;
-        },
-    });
-    activeGoalPopup = popup;
+    const content = overlay.find('.cc-goal-panel');
+    const closeGoalPopup = () => {
+        $(document).off('keydown.ccGoal');
+        overlay.remove();
+        if (activeGoalPopup === overlay[0]) activeGoalPopup = null;
+    };
+    activeGoalPopup = overlay[0];
 
     content.find(`input[name="cc-goal-mode"][value="${settings.mode}"]`).prop('checked', true);
     content.find('#cc-goal-random-prompts').val(settings.randomPrompts);
@@ -1102,7 +1102,7 @@ function openGoalPopup() {
         const preview = pickGoalPrompt(prompts, String(content.find('#cc-goal-preview').val() || settings.lastRandomPrompt));
         content.find('#cc-goal-preview').val(preview);
     });
-    content.find('#cc-goal-run').on('click', async () => {
+    content.find('#cc-goal-run').on('click', () => {
         persistUi();
         const actionSettings = clone(getGoalSettings());
         if (actionSettings.mode === 'random' && !parseGoalPrompts(actionSettings.randomPrompts).length) {
@@ -1110,17 +1110,21 @@ function openGoalPopup() {
             return;
         }
         const preview = String(content.find('#cc-goal-preview').val() || '').trim();
-        await popup.complete(POPUP_RESULT.AFFIRMATIVE);
+        closeGoalPopup();
         setTimeout(() => runGoalAction(actionSettings, preview), 50);
     });
 
     refreshPromptCount();
     refreshMode();
-    popup.show().catch((error) => {
-        activeGoalPopup = null;
-        console.error(`${LOG_PREFIX} Goal popup failed`, error);
-        toastr.error(String(error?.message || error), 'CC Goal failed to open');
+    overlay.find('.cc-goal-close').on('click', closeGoalPopup);
+    overlay.on('mousedown', (event) => {
+        if (event.target === overlay[0]) closeGoalPopup();
     });
+    $(document).off('keydown.ccGoal').on('keydown.ccGoal', (event) => {
+        if (event.key === 'Escape') closeGoalPopup();
+    });
+    document.body.append(overlay[0]);
+    content.find('#cc-goal-run')[0]?.focus();
 }
 
 // SillyTavern calls this before it finishes assembling the outgoing prompt.
@@ -1448,7 +1452,7 @@ function registerSlashCommands() {
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'goal',
-        callback: async (_args, value) => {
+        callback: (_args, value) => {
             if (String(value || '').trim()) {
                 const text = 'Usage: /goal';
                 toastr.warning(text, 'CC Goal');
@@ -1457,6 +1461,8 @@ function registerSlashCommands() {
             openGoalPopup();
             return '';
         },
+        namedArgumentList: [],
+        unnamedArgumentList: [],
         helpString: 'Opens the Goal interface for a saved random prompt, SillyTavern native impersonate, or CC impersonate.',
         returns: ARGUMENT_TYPE.STRING,
     }));

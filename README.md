@@ -1,6 +1,6 @@
 # CC Compact for SillyTavern
 
-> **v1.3.0:** simplifies Compact to one context-window selector, triggers at 90% by default, observes real finalized prompt sizes for injected-context overhead, and restricts compacted memory to fictional world and plot continuity. Chat Completion Preset text is never stored, summarized, or injected.
+> **v1.3.1:** fixes `/goal` on clients whose native Popup path throws a null `contains` error by using an extension-owned lightweight overlay. It also simplifies Compact to one context-window selector, triggers at 90% by default, and restricts compacted memory to fictional world and plot continuity. Chat Completion Preset text is never stored, summarized, or injected.
 
 
 A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
