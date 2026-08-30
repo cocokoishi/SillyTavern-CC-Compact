@@ -22,6 +22,7 @@ const DEFAULT_GOAL_SETTINGS = Object.freeze({
     randomPrompts: '',
     lastRandomPrompt: '',
     builtinPrompt: '',
+    disableReasoning: false,
     autoSend: true,
 });
 
@@ -75,6 +76,7 @@ let initialized = false;
 let inCompaction = false;
 let activeGoalPopup = null;
 let goalActionRunning = false;
+let goalStopRequested = false;
 let activePromptObservation = null;
 const promptObservations = new Map();
 let staticPromptTokenCache = { identity: '', source: '', tokens: 0 };
@@ -95,6 +97,71 @@ function debounce(fn, delay = 350) {
         clearTimeout(timer);
         timer = setTimeout(() => fn(...args), delay);
     };
+}
+
+function showTaskNotice(title, message, { onStop = null } = {}) {
+    let host = document.querySelector('#cc-compact-task-notices');
+    if (!(host instanceof HTMLElement)) {
+        host = document.createElement('div');
+        host.id = 'cc-compact-task-notices';
+        host.setAttribute('aria-live', 'polite');
+        document.body.append(host);
+    }
+
+    const notice = document.createElement('div');
+    notice.className = 'cc-compact-task-notice';
+    const spinner = document.createElement('i');
+    spinner.className = 'fa-solid fa-spinner fa-spin';
+    const text = document.createElement('span');
+    const heading = document.createElement('b');
+    const detail = document.createElement('small');
+    heading.textContent = title;
+    detail.textContent = message;
+    text.append(heading, detail);
+    notice.append(spinner, text);
+    if (typeof onStop === 'function') {
+        const stopButton = document.createElement('button');
+        stopButton.className = 'menu_button cc-compact-task-stop';
+        stopButton.type = 'button';
+        stopButton.textContent = 'Stop';
+        stopButton.addEventListener('click', onStop);
+        notice.append(stopButton);
+    }
+    host.append(notice);
+
+    return {
+        update(nextMessage) {
+            detail.textContent = String(nextMessage || '');
+        },
+        hide() {
+            notice.remove();
+            if (!host.childElementCount) host.remove();
+        },
+    };
+}
+
+async function withTemporaryReasoningDisabled(context, disabled, callback) {
+    if (!disabled) return await callback();
+
+    const changes = [];
+    const override = (target, key, value) => {
+        if (!target || typeof target !== 'object') return;
+        changes.push({ target, key, hadOwn: Object.hasOwn(target, key), previous: target[key] });
+        target[key] = value;
+    };
+
+    override(context.chatCompletionSettings, 'reasoning_effort', 'none');
+    override(context.chatCompletionSettings, 'show_thoughts', false);
+    override(context.textCompletionSettings, 'include_reasoning', false);
+
+    try {
+        return await callback();
+    } finally {
+        for (const change of changes.reverse()) {
+            if (change.hadOwn) change.target[change.key] = change.previous;
+            else delete change.target[change.key];
+        }
+    }
 }
 
 function nearestContextPresetForThreshold(thresholdTokens, triggerPercent = DEFAULT_TRIGGER_PERCENT) {
@@ -713,18 +780,13 @@ async function compactContext(trigger = 'manual', options = {}) {
         return { success: false, reason: 'nothing-to-fold', message };
     }
 
-    let loaderHandle = null;
+    let taskNotice = null;
     try {
         inCompaction = true;
-        if (context.loader?.show) {
-            loaderHandle = context.loader.show({
-                message: trigger === 'automatic' ? 'Automatically compacting context…' : 'Compacting context…',
-                title: 'CC Compact',
-                toastMode: 'static',
-            });
-        } else if (manual) {
-            toastr.info('Compacting context…', 'CC Compact');
-        }
+        taskNotice = showTaskNotice(
+            'CC Compact',
+            trigger === 'automatic' ? 'Automatically compacting context…' : 'Compacting context…',
+        );
 
         const summary = await generateCompactedSummary(state.summary, fold, settings);
 
@@ -770,7 +832,7 @@ async function compactContext(trigger = 'manual', options = {}) {
         return { success: false, reason: 'error', message: String(error?.message || error) };
     } finally {
         inCompaction = false;
-        if (loaderHandle?.hide) await loaderHandle.hide();
+        taskNotice?.hide();
     }
 }
 
@@ -842,6 +904,7 @@ function setGoalComposerText(text) {
 
 async function sendGoalComposerText() {
     await new Promise(resolve => requestAnimationFrame(() => resolve()));
+    if (goalStopRequested) return;
     const sendButton = document.querySelector('#send_but');
     if (!(sendButton instanceof HTMLElement)) {
         throw new Error('SillyTavern send button was not found.');
@@ -852,6 +915,28 @@ async function sendGoalComposerText() {
         throw new Error('SillyTavern is still generating or is not connected. The Goal draft was left in the input box.');
     }
     sendButton.click();
+
+    // The click handler starts Generate() asynchronously. Wait until the
+    // generation lock clears before allowing the next Goal round to begin.
+    const startedAt = Date.now();
+    while (document.body.dataset.generating !== 'true' && Date.now() - startedAt < 1500) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (document.body.dataset.generating !== 'true') return;
+
+    let stopIssued = false;
+    while (document.body.dataset.generating === 'true') {
+        if (goalStopRequested) {
+            if (!stopIssued) {
+                SillyTavern.getContext().stopGeneration?.();
+                stopIssued = true;
+            }
+        }
+        if (Date.now() - startedAt > 30 * 60 * 1000) {
+            throw new Error('Timed out waiting for the character reply to finish.');
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
 }
 
 function buildGoalLiteTranscript() {
@@ -881,85 +966,127 @@ function buildGoalLiteTranscript() {
     return selected.join('\n');
 }
 
-async function runGoalAction(actionSettings, previewPrompt = '') {
-    if (goalActionRunning) {
-        toastr.warning('A Goal action is already running.', 'CC Goal');
-        return;
-    }
-
+async function runGoalRound(actionSettings, previewPrompt = '', taskNotice = null) {
     const context = SillyTavern.getContext();
     if (!context.chatId && !context.groupId && context.characterId == null) {
-        toastr.warning('Open a chat before using /goal.', 'CC Goal');
-        return;
+        throw new Error('Open a chat before using /goal.');
     }
 
     const identity = getChatIdentity(context);
     const mode = actionSettings.mode;
     let draft = '';
-    let loaderHandle = null;
 
-    try {
-        goalActionRunning = true;
-        if (context.loader?.show) {
-            const message = mode === 'random' ? 'Selecting a saved prompt…' : 'Drafting the next user message…';
-            loaderHandle = context.loader.show({ message, title: 'CC Goal', toastMode: 'static' });
+    if (goalStopRequested) return { stopped: true };
+    const message = mode === 'random'
+        ? 'Selecting a saved prompt…'
+        : `Drafting the next user message${actionSettings.disableReasoning ? ' without reasoning' : ''}…`;
+    taskNotice?.update(message);
+
+    if (mode === 'random') {
+        const prompts = parseGoalPrompts(actionSettings.randomPrompts);
+        if (!prompts.length) throw new Error('The random prompt library is empty. Add at least one prompt in /goal.');
+        draft = prompts.includes(previewPrompt)
+            ? previewPrompt
+            : pickGoalPrompt(prompts, actionSettings.lastRandomPrompt);
+        const currentGoalSettings = getGoalSettings();
+        currentGoalSettings.lastRandomPrompt = draft;
+        SillyTavern.getContext().saveSettingsDebounced();
+    } else if (mode === 'builtin') {
+        setGoalComposerText('');
+        const prompt = String(actionSettings.builtinPrompt || '').trim();
+        const options = prompt ? { quiet_prompt: prompt, quietToLoud: true } : {};
+        await withTemporaryReasoningDisabled(
+            context,
+            Boolean(actionSettings.disableReasoning),
+            () => Generate('impersonate', options),
+        );
+        draft = String(document.querySelector('#send_textarea')?.value || '').trim();
+        if (!draft) throw new Error('SillyTavern impersonate returned an empty message.');
+    } else if (mode === 'custom') {
+        if (typeof context.generateRaw !== 'function') {
+            throw new Error('SillyTavern generateRaw() is unavailable. Update SillyTavern to a current release.');
         }
-
-        if (mode === 'random') {
-            const prompts = parseGoalPrompts(actionSettings.randomPrompts);
-            if (!prompts.length) throw new Error('The random prompt library is empty. Add at least one prompt in /goal.');
-            draft = prompts.includes(previewPrompt)
-                ? previewPrompt
-                : pickGoalPrompt(prompts, actionSettings.lastRandomPrompt);
-            const currentGoalSettings = getGoalSettings();
-            currentGoalSettings.lastRandomPrompt = draft;
-            SillyTavern.getContext().saveSettingsDebounced();
-        } else if (mode === 'builtin') {
-            setGoalComposerText('');
-            const prompt = String(actionSettings.builtinPrompt || '').trim();
-            const options = prompt ? { quiet_prompt: prompt, quietToLoud: true } : {};
-            await Generate('impersonate', options);
-            draft = String(document.querySelector('#send_textarea')?.value || '').trim();
-            if (!draft) throw new Error('SillyTavern impersonate returned an empty message.');
-        } else if (mode === 'custom') {
-            if (typeof context.generateRaw !== 'function') {
-                throw new Error('SillyTavern generateRaw() is unavailable. Update SillyTavern to a current release.');
-            }
-            const recentTranscript = buildGoalLiteTranscript();
-            if (!recentTranscript) throw new Error('There is no recent conversation to reply to.');
-            const raw = await context.generateRaw({
+        const recentTranscript = buildGoalLiteTranscript();
+        if (!recentTranscript) throw new Error('There is no recent conversation to reply to.');
+        const raw = await withTemporaryReasoningDisabled(
+            context,
+            Boolean(actionSettings.disableReasoning),
+            () => context.generateRaw({
                 prompt: recentTranscript,
                 systemPrompt: GOAL_LITE_SYSTEM_PROMPT,
                 trimNames: true,
-            });
-            draft = String(raw || '').trim();
-            if (!draft) throw new Error('Custom impersonate returned an empty message.');
-        } else {
-            throw new Error(`Unknown Goal mode: ${mode}`);
-        }
+            }),
+        );
+        draft = String(raw || '').trim();
+        if (!draft) throw new Error('Custom impersonate returned an empty message.');
+    } else {
+        throw new Error(`Unknown Goal mode: ${mode}`);
+    }
 
-        if (getChatIdentity(SillyTavern.getContext()) !== identity) {
-            throw new Error('The chat changed while Goal was running; the generated message was discarded.');
-        }
+    if (getChatIdentity(SillyTavern.getContext()) !== identity) {
+        throw new Error('The chat changed while Goal was running; the generated message was discarded.');
+    }
 
-        setGoalComposerText(draft);
-        if (loaderHandle?.hide) {
-            await loaderHandle.hide();
-            loaderHandle = null;
-        }
+    setGoalComposerText(draft);
+    if (goalStopRequested) return { stopped: true };
+    if (actionSettings.autoSend) {
+        taskNotice?.update('Waiting for the character reply to finish…');
+        await sendGoalComposerText();
+    } else {
+        toastr.info('Goal draft placed in the message input. Auto-send is off; stop Goal when ready.', 'CC Goal');
+    }
+    return { success: true };
+}
 
-        if (actionSettings.autoSend) {
-            await sendGoalComposerText();
-        } else {
-            toastr.success('Goal draft placed in the message input.', 'CC Goal');
+async function runGoalLoop(actionSettings, previewPrompt = '') {
+    if (goalActionRunning) {
+        toastr.warning('A Goal loop is already running.', 'CC Goal');
+        return;
+    }
+
+    goalActionRunning = true;
+    goalStopRequested = false;
+    let rounds = 0;
+    const taskNotice = showTaskNotice(
+        'CC Goal',
+        'Starting continuous Goal loop…',
+        { onStop: requestGoalStop },
+    );
+
+    try {
+        while (!goalStopRequested) {
+            rounds++;
+            const result = await runGoalRound(actionSettings, previewPrompt, taskNotice);
+            previewPrompt = '';
+            if (!result?.success || result?.stopped) break;
+            if (!actionSettings.autoSend) {
+                taskNotice.update(`Round ${rounds} complete · draft replaced in input; click Stop to finish.`);
+            }
+            await new Promise(resolve => setTimeout(resolve, 250));
         }
     } catch (error) {
-        console.error(`${LOG_PREFIX} Goal action failed`, error);
-        toastr.error(String(error?.message || error), 'CC Goal failed');
+        if (!goalStopRequested) {
+            console.error(`${LOG_PREFIX} Goal loop failed`, error);
+            toastr.error(String(error?.message || error), 'CC Goal failed');
+        }
     } finally {
+        taskNotice.hide();
         goalActionRunning = false;
-        if (loaderHandle?.hide) await loaderHandle.hide();
+        const stopped = goalStopRequested;
+        goalStopRequested = false;
+        if (stopped) {
+            toastr.info(`Goal stopped after ${rounds} round${rounds === 1 ? '' : 's'}.`, 'CC Goal');
+        }
     }
+}
+
+function requestGoalStop() {
+    if (!goalActionRunning) return false;
+    goalStopRequested = true;
+    if (document.body.dataset.generating === 'true') {
+        SillyTavern.getContext().stopGeneration?.();
+    }
+    return true;
 }
 
 function openGoalPopup() {
@@ -971,7 +1098,7 @@ function openGoalPopup() {
     const settings = getGoalSettings();
     const overlay = $(`
         <div class="cc-goal-overlay" role="presentation">
-            <div class="cc-goal-dialog" role="dialog" aria-modal="true" aria-labelledby="cc-goal-title">
+            <div class="cc-goal-dialog" role="dialog" aria-modal="false" aria-labelledby="cc-goal-title">
                 <button class="cc-goal-close menu_button" type="button" aria-label="Close Goal">
                     <i class="fa-solid fa-xmark"></i>
                 </button>
@@ -1019,6 +1146,11 @@ function openGoalPopup() {
                 <small class="compact-muted">Input is capped at 800 characters. Reasoning and response length use the active SillyTavern/model settings without truncation.</small>
             </section>
 
+            <label class="checkbox_label cc-goal-reasoning-option" for="cc-goal-disable-reasoning">
+                <input id="cc-goal-disable-reasoning" type="checkbox">
+                <span><b>Disable reasoning for impersonate requests</b><small>Saved as a Goal-only preference. The active backend must support reasoning_effort=none.</small></span>
+            </label>
+
             <label class="checkbox_label cc-goal-auto-send" for="cc-goal-auto-send">
                 <input id="cc-goal-auto-send" type="checkbox">
                 <span>Send immediately and generate the character reply</span>
@@ -1026,6 +1158,7 @@ function openGoalPopup() {
             <small class="compact-muted">If disabled, the selected/generated message is left in the input box for editing.</small>
 
             <div class="cc-goal-run-row">
+                <button id="cc-goal-stop" class="menu_button" type="button">Stop Goal</button>
                 <button id="cc-goal-run" class="menu_button menu_button_icon" type="button">
                     <i class="fa-solid fa-play"></i><span>Run Goal</span>
                 </button>
@@ -1045,6 +1178,7 @@ function openGoalPopup() {
     content.find(`input[name="cc-goal-mode"][value="${settings.mode}"]`).prop('checked', true);
     content.find('#cc-goal-random-prompts').val(settings.randomPrompts);
     content.find('#cc-goal-builtin-prompt').val(settings.builtinPrompt);
+    content.find('#cc-goal-disable-reasoning').prop('checked', Boolean(settings.disableReasoning));
     content.find('#cc-goal-auto-send').prop('checked', Boolean(settings.autoSend));
 
     const refreshPromptCount = () => {
@@ -1057,14 +1191,17 @@ function openGoalPopup() {
         content.find(`input[name="cc-goal-mode"][value="${mode}"]`).closest('.cc-goal-mode-card').addClass('cc-goal-mode-selected');
         content.find('.cc-goal-mode-panel').hide();
         content.find(`.cc-goal-mode-panel[data-goal-panel="${mode}"]`).show();
+        content.find('.cc-goal-reasoning-option').toggle(mode !== 'random');
         const labels = { random: 'Draw and run', builtin: 'Run native impersonate', custom: 'Run CC impersonate' };
         content.find('#cc-goal-run span').text(labels[mode]);
+        content.find('#cc-goal-stop').prop('disabled', !goalActionRunning);
     };
     const persistUi = () => {
         const goal = getGoalSettings();
         goal.mode = String(content.find('input[name="cc-goal-mode"]:checked').val() || 'random');
         goal.randomPrompts = String(content.find('#cc-goal-random-prompts').val() || '');
         goal.builtinPrompt = String(content.find('#cc-goal-builtin-prompt').val() || '');
+        goal.disableReasoning = Boolean(content.find('#cc-goal-disable-reasoning').prop('checked'));
         goal.autoSend = Boolean(content.find('#cc-goal-auto-send').prop('checked'));
         SillyTavern.getContext().saveSettingsDebounced();
     };
@@ -1080,6 +1217,7 @@ function openGoalPopup() {
         persistUiDebounced();
     });
     content.find('#cc-goal-builtin-prompt').on('input', persistUiDebounced);
+    content.find('#cc-goal-disable-reasoning').on('change', persistUi);
     content.find('#cc-goal-auto-send').on('change', persistUi);
     content.find('#cc-goal-preview-button').on('click', () => {
         const prompts = parseGoalPrompts(content.find('#cc-goal-random-prompts').val());
@@ -1099,8 +1237,9 @@ function openGoalPopup() {
         }
         const preview = String(content.find('#cc-goal-preview').val() || '').trim();
         closeGoalPopup();
-        setTimeout(() => runGoalAction(actionSettings, preview), 50);
+        setTimeout(() => runGoalLoop(actionSettings, preview), 50);
     });
+    content.find('#cc-goal-stop').on('click', requestGoalStop);
 
     refreshPromptCount();
     refreshMode();
@@ -1441,8 +1580,15 @@ function registerSlashCommands() {
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'goal',
         callback: (_args, value) => {
-            if (String(value || '').trim()) {
-                const text = 'Usage: /goal';
+            const action = String(value || '').trim().toLowerCase();
+            if (action === 'stop') {
+                const stopped = requestGoalStop();
+                const text = stopped ? 'Goal stop requested.' : 'No Goal loop is running.';
+                if (stopped) toastr.info(text, 'CC Goal');
+                return text;
+            }
+            if (action) {
+                const text = 'Usage: /goal or /goal stop';
                 toastr.warning(text, 'CC Goal');
                 return text;
             }

@@ -1,6 +1,6 @@
 # CC Compact for SillyTavern
 
-> **v1.3.3:** fixes `/goal` on reasoning models by leaving the complete reasoning/output budget untouched and using the returned response content directly, without truncating or imposing a final character limit.
+> **v1.4.1:** makes `/goal` a serial continuous loop that runs until **Stop Goal** or `/goal stop`, while keeping the persistent reasoning toggle and non-modal status UI.
 
 
 A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
@@ -96,7 +96,11 @@ Type `/goal` to open a three-mode interface. Its selected mode, random prompt li
 - **SillyTavern impersonate** calls the native `Generate('impersonate')` path, so it uses the active character, lore, prompt formatting, and normal SillyTavern impersonation behavior.
 - **CC impersonate** is deliberately lightweight. It includes at most four recent messages within an 800-character input budget and makes one `generateRaw` request. Reasoning and response length use the active SillyTavern/model settings; the returned response content is used directly without truncation.
 
-By default, Goal sends the selected/generated user message immediately and starts the normal character reply. Turn off **Send immediately** to leave the result in SillyTavern's input box for review or editing instead.
+The independent **Disable reasoning for impersonate requests** option is persisted with Goal settings. When enabled, Compact temporarily requests `reasoning_effort=none` and disables returned thoughts/reasoning for native and CC impersonate calls, then restores the original SillyTavern settings after the request. Unsupported backends may ignore this option.
+
+Press **Run Goal** to start a serial loop. Each round creates the next user message, sends it when **Send immediately** is enabled, waits for the character reply to finish, and only then starts the next round. It continues until **Stop Goal** is clicked or `/goal stop` is entered. If **Send immediately** is disabled, each round replaces the draft in the input box; use **Stop Goal** to end the loop and edit the final draft.
+
+Goal uses a non-modal floating panel. Compaction and Goal requests show only a compact status notice, so the rest of SillyTavern stays operable while work is running.
 
 ## Persistence and reset
 
