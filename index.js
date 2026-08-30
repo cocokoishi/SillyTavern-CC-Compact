@@ -14,7 +14,7 @@ const LOG_PREFIX = '[CC Compact]';
 const CONTEXT_PRESETS = Object.freeze([32766, 65536, 131072, 262144, 400000, 500000]);
 const DEFAULT_TRIGGER_PERCENT = 90;
 
-const GOAL_LITE_SYSTEM_PROMPT = '代替{{user}}回复最后一条消息。结合所给的最近对话，只输出自然、准确、可直接发送的回复正文，不解释，不列选项，不替{{char}}说话。';
+const GOAL_LITE_SYSTEM_PROMPT = '代替{{user}}回复最后一条消息。优先遵循用户引导，结合所给的最近对话，并推进引导目标而不是重复已完成的动作；只输出自然、准确、可直接发送的回复正文，不解释，不列选项，不替{{char}}说话。';
 const GOAL_LITE_INPUT_CHAR_BUDGET = 800;
 
 const DEFAULT_GOAL_SETTINGS = Object.freeze({
@@ -22,6 +22,7 @@ const DEFAULT_GOAL_SETTINGS = Object.freeze({
     randomPrompts: '',
     lastRandomPrompt: '',
     builtinPrompt: '',
+    customGuidance: '',
     disableReasoning: false,
     autoSend: true,
 });
@@ -939,8 +940,11 @@ async function sendGoalComposerText() {
     }
 }
 
-function buildGoalLiteTranscript() {
+function buildGoalLiteTranscript(guidance = '') {
     const context = SillyTavern.getContext();
+    const guidanceText = String(guidance || '').trim().slice(0, 240);
+    const task = guidanceText ? `G:${guidanceText}` : 'G:根据当前剧情自然推进下一条回复。';
+    const transcriptBudget = Math.max(240, GOAL_LITE_INPUT_CHAR_BUDGET - task.length - 1);
     const messages = (context.chat || [])
         .filter(message => message
             && !message.extra?.compact_marker
@@ -955,7 +959,7 @@ function buildGoalLiteTranscript() {
         const speaker = message.is_user ? 'U' : 'A';
         const body = String(message.mes).trim();
         const separatorLength = selected.length ? 1 : 0;
-        const remaining = GOAL_LITE_INPUT_CHAR_BUDGET - usedCharacters - 2 - separatorLength;
+        const remaining = transcriptBudget - usedCharacters - 2 - separatorLength;
         if (remaining <= 0) break;
         const excerpt = body.length > remaining
             ? (remaining === 1 ? '…' : `…${body.slice(-(remaining - 1))}`)
@@ -963,7 +967,9 @@ function buildGoalLiteTranscript() {
         selected.unshift(`${speaker}:${excerpt}`);
         usedCharacters += excerpt.length + 2 + separatorLength;
     }
-    return selected.join('\n');
+    const transcript = selected.join('\n');
+    if (!transcript) return '';
+    return `${transcript}\n${task}`;
 }
 
 async function runGoalRound(actionSettings, previewPrompt = '', taskNotice = null) {
@@ -1006,7 +1012,10 @@ async function runGoalRound(actionSettings, previewPrompt = '', taskNotice = nul
         if (typeof context.generateRaw !== 'function') {
             throw new Error('SillyTavern generateRaw() is unavailable. Update SillyTavern to a current release.');
         }
-        const recentTranscript = buildGoalLiteTranscript();
+        if (!String(actionSettings.customGuidance || '').trim()) {
+            throw new Error('CC impersonate requires user guidance.');
+        }
+        const recentTranscript = buildGoalLiteTranscript(actionSettings.customGuidance);
         if (!recentTranscript) throw new Error('There is no recent conversation to reply to.');
         const raw = await withTemporaryReasoningDisabled(
             context,
@@ -1143,6 +1152,9 @@ function openGoalPopup() {
             <section class="cc-goal-mode-panel" data-goal-panel="custom">
                 <b>Lightweight CC impersonate</b>
                 <p>Uses only a small recent-chat excerpt and one lightweight request, then uses the returned response content directly.</p>
+                <label for="cc-goal-custom-guidance"><b>User guidance for the next message</b></label>
+                <textarea id="cc-goal-custom-guidance" class="text_pole" rows="3" placeholder="For example: Ask where the key is, move the scene toward the station, or calm the other character."></textarea>
+                <small class="compact-muted">Saved with Goal and reused on each loop round. Up to 240 characters are included in the lightweight request.</small>
                 <small class="compact-muted">Input is capped at 800 characters. Reasoning and response length use the active SillyTavern/model settings without truncation.</small>
             </section>
 
@@ -1178,6 +1190,7 @@ function openGoalPopup() {
     content.find(`input[name="cc-goal-mode"][value="${settings.mode}"]`).prop('checked', true);
     content.find('#cc-goal-random-prompts').val(settings.randomPrompts);
     content.find('#cc-goal-builtin-prompt').val(settings.builtinPrompt);
+    content.find('#cc-goal-custom-guidance').val(settings.customGuidance);
     content.find('#cc-goal-disable-reasoning').prop('checked', Boolean(settings.disableReasoning));
     content.find('#cc-goal-auto-send').prop('checked', Boolean(settings.autoSend));
 
@@ -1201,6 +1214,7 @@ function openGoalPopup() {
         goal.mode = String(content.find('input[name="cc-goal-mode"]:checked').val() || 'random');
         goal.randomPrompts = String(content.find('#cc-goal-random-prompts').val() || '');
         goal.builtinPrompt = String(content.find('#cc-goal-builtin-prompt').val() || '');
+        goal.customGuidance = String(content.find('#cc-goal-custom-guidance').val() || '');
         goal.disableReasoning = Boolean(content.find('#cc-goal-disable-reasoning').prop('checked'));
         goal.autoSend = Boolean(content.find('#cc-goal-auto-send').prop('checked'));
         SillyTavern.getContext().saveSettingsDebounced();
@@ -1217,6 +1231,7 @@ function openGoalPopup() {
         persistUiDebounced();
     });
     content.find('#cc-goal-builtin-prompt').on('input', persistUiDebounced);
+    content.find('#cc-goal-custom-guidance').on('input', persistUiDebounced);
     content.find('#cc-goal-disable-reasoning').on('change', persistUi);
     content.find('#cc-goal-auto-send').on('change', persistUi);
     content.find('#cc-goal-preview-button').on('click', () => {
@@ -1233,6 +1248,10 @@ function openGoalPopup() {
         const actionSettings = clone(getGoalSettings());
         if (actionSettings.mode === 'random' && !parseGoalPrompts(actionSettings.randomPrompts).length) {
             toastr.warning('Add at least one line to the prompt library.', 'CC Goal');
+            return;
+        }
+        if (actionSettings.mode === 'custom' && !String(actionSettings.customGuidance || '').trim()) {
+            toastr.warning('Write a user guidance/goal for CC impersonate first.', 'CC Goal');
             return;
         }
         const preview = String(content.find('#cc-goal-preview').val() || '').trim();

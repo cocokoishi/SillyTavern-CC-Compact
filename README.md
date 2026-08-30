@@ -1,6 +1,6 @@
 # CC Compact for SillyTavern
 
-> **v1.4.1:** makes `/goal` a serial continuous loop that runs until **Stop Goal** or `/goal stop`, while keeping the persistent reasoning toggle and non-modal status UI.
+> **v1.5.0:** adds persistent user guidance to CC impersonate and makes `/goal` a serial continuous loop that runs until **Stop Goal** or `/goal stop`, while keeping the persistent reasoning toggle and non-modal status UI.
 
 
 A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
@@ -20,7 +20,7 @@ The state is **per chat/session**. Switching chats restores that chat's own comp
 - `/compact` — manually compact the current chat.
 - `/compact status` — show current threshold, hidden-message count, summary size, and last compaction.
 - `/compact reset` — clear the compacted summary and put messages hidden by this extension back into the model context.
-- `/goal` — open the Goal interface with random prompt, native impersonate, and lightweight CC impersonate modes.
+- `/goal` — open the Goal interface with random prompt, native impersonate, and lightweight CC impersonate modes; `/goal stop` stops its continuous loop.
 - Automatic compaction before generation at **90% of the selected context window**.
 - Built-in context presets: `32766`, `65536`, `131072`, `262144`, `400000`, and `500000`, plus automatic and custom modes.
 - Global settings plus optional **per-chat overrides**.
@@ -94,7 +94,7 @@ Type `/goal` to open a three-mode interface. Its selected mode, random prompt li
 
 - **Random prompt** picks one non-empty line from the saved prompt library. It avoids immediately repeating the previous prompt when alternatives exist.
 - **SillyTavern impersonate** calls the native `Generate('impersonate')` path, so it uses the active character, lore, prompt formatting, and normal SillyTavern impersonation behavior.
-- **CC impersonate** is deliberately lightweight. It includes at most four recent messages within an 800-character input budget and makes one `generateRaw` request. Reasoning and response length use the active SillyTavern/model settings; the returned response content is used directly without truncation.
+- **CC impersonate** is deliberately lightweight. It accepts a persistent user guidance/goal field, includes at most four recent messages within an 800-character input budget, and makes one `generateRaw` request. Reasoning and response length use the active SillyTavern/model settings; the returned response content is used directly without truncation.
 
 The independent **Disable reasoning for impersonate requests** option is persisted with Goal settings. When enabled, Compact temporarily requests `reasoning_effort=none` and disables returned thoughts/reasoning for native and CC impersonate calls, then restores the original SillyTavern settings after the request. Unsupported backends may ignore this option.
 
