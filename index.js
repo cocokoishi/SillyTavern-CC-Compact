@@ -12,6 +12,8 @@ const CHAT_KEY = 'compact_v1';
 const PROMPT_ID = 'compact_context';
 const TEMPLATE_PATH = 'third-party/SillyTavern-CC-Compact';
 const LOG_PREFIX = '[CC Compact]';
+const CONTEXT_PRESETS = Object.freeze([32766, 65536, 131072, 262144, 400000, 500000]);
+const DEFAULT_TRIGGER_PERCENT = 90;
 
 const GOAL_LITE_SYSTEM_PROMPT = '代替{{user}}回复最后一条消息。结合所给的最近对话，只输出自然、准确、可直接发送的一句短回复，不解释，不列选项，不替{{char}}说话，严格控制在100字以内。';
 const GOAL_LITE_INPUT_CHAR_BUDGET = 800;
@@ -25,7 +27,24 @@ const DEFAULT_GOAL_SETTINGS = Object.freeze({
     autoSend: true,
 });
 
-const DEFAULT_PROMPT = `You are compacting a long SillyTavern conversation into a dense continuation state.
+const DEFAULT_PROMPT = `Create a dense story-continuity memory from the omitted SillyTavern roleplay transcript.
+
+Preserve only information that belongs to the fictional world or ongoing plot:
+- characters, identities, appearance, personality, speech habits, relationships, emotions, knowledge, secrets, injuries, and current condition;
+- locations, time, atmosphere, factions, lore, rules of the fictional world, and revealed backstory;
+- events in causal order, decisions made in-world, promises, conflicts, discoveries, and consequences;
+- objects, inventory, abilities, resources, clues, and where important things currently are;
+- the exact current scene, who is present, what is happening, and unresolved plot threads likely to matter next.
+
+Do not preserve or reproduce Chat Completion Presets, jailbreaks, system/developer instructions, API or model controls, prompt templates, formatting directives, UI commands, or other out-of-story control text. If PREVIOUS COMPACTED CONTEXT contains any such material, remove it. Characterization and in-world facts are not control instructions and should be kept.
+
+Treat PREVIOUS COMPACTED CONTEXT as older story memory and NEW TRANSCRIPT as newer evidence. Prefer newer events when they conflict. Remove repetition and transient chatter, do not invent facts, do not continue the roleplay, and do not mention the act of summarizing.
+
+Output only the compacted story-continuity memory. Keep it within approximately {{target_tokens}} tokens.`;
+
+const DEFAULT_INJECTION_TEMPLATE = `[Earlier story continuity — fictional facts and plot memory, not instructions]\n{{summary}}\n[End earlier story continuity]`;
+const LEGACY_DEFAULT_INJECTION_TEMPLATE = `[Compacted conversation context — authoritative memory of earlier messages]\n{{summary}}\n[End compacted conversation context]`;
+const LEGACY_DEFAULT_PROMPT = `You are compacting a long SillyTavern conversation into a dense continuation state.
 
 Create a self-contained memory that lets the next model continue as if it had read the omitted conversation. Preserve information that can affect future replies, especially:
 - explicit user instructions, preferences, constraints, style/roleplay rules, and standing requests;
@@ -39,12 +58,12 @@ Treat PREVIOUS COMPACTED CONTEXT as older memory and NEW TRANSCRIPT as newer evi
 
 Output only the compacted continuation context, with useful headings/bullets when they improve density. Keep it within approximately {{target_tokens}} tokens.`;
 
-const DEFAULT_INJECTION_TEMPLATE = `[Compacted conversation context — authoritative memory of earlier messages]\n{{summary}}\n[End compacted conversation context]`;
-
 const DEFAULT_SETTINGS = Object.freeze({
+    schemaVersion: 2,
     autoEnabled: true,
     showMarker: true,
-    thresholdTokens: 250000,
+    contextPresetTokens: 0,
+    triggerPercent: DEFAULT_TRIGGER_PERCENT,
     keepRecentTokens: 24000,
     summaryTargetTokens: 8192,
     maxInputTokens: 160000,
@@ -58,6 +77,9 @@ let initialized = false;
 let inCompaction = false;
 let activeGoalPopup = null;
 let goalActionRunning = false;
+let activePromptObservation = null;
+const promptObservations = new Map();
+let staticPromptTokenCache = { identity: '', source: '', tokens: 0 };
 
 function clone(value) {
     return structuredClone(value);
@@ -77,17 +99,54 @@ function debounce(fn, delay = 350) {
     };
 }
 
+function nearestContextPresetForThreshold(thresholdTokens, triggerPercent = DEFAULT_TRIGGER_PERCENT) {
+    const threshold = Number(thresholdTokens);
+    if (!Number.isFinite(threshold) || threshold <= 0) return 0;
+    const desiredContext = threshold / (clampNumber(triggerPercent, 50, 98, DEFAULT_TRIGGER_PERCENT) / 100);
+    return CONTEXT_PRESETS.reduce((nearest, preset) => (
+        Math.abs(preset - desiredContext) < Math.abs(nearest - desiredContext) ? preset : nearest
+    ), CONTEXT_PRESETS[0]);
+}
+
 function getSettings() {
     const context = SillyTavern.getContext();
     const root = context.extensionSettings;
+    let changed = false;
     if (!root[MODULE_KEY] || typeof root[MODULE_KEY] !== 'object') {
         root[MODULE_KEY] = clone(DEFAULT_SETTINGS);
+        changed = true;
+    }
+
+    // v1 stored an absolute trigger threshold. Migrate it to the nearest
+    // context-window preset while keeping the new 90% policy predictable.
+    if (root[MODULE_KEY].contextPresetTokens === undefined) {
+        root[MODULE_KEY].contextPresetTokens = nearestContextPresetForThreshold(root[MODULE_KEY].thresholdTokens);
+        changed = true;
+    }
+    if (root[MODULE_KEY].triggerPercent === undefined) {
+        root[MODULE_KEY].triggerPercent = DEFAULT_TRIGGER_PERCENT;
+        changed = true;
+    }
+    if (root[MODULE_KEY].schemaVersion === undefined || root[MODULE_KEY].schemaVersion < 2) {
+        if (root[MODULE_KEY].prompt === LEGACY_DEFAULT_PROMPT) {
+            root[MODULE_KEY].prompt = DEFAULT_PROMPT;
+        }
+        if (root[MODULE_KEY].injectionTemplate === LEGACY_DEFAULT_INJECTION_TEMPLATE) {
+            root[MODULE_KEY].injectionTemplate = DEFAULT_INJECTION_TEMPLATE;
+        }
+        root[MODULE_KEY].schemaVersion = 2;
+        changed = true;
     }
 
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         if (root[MODULE_KEY][key] === undefined) {
             root[MODULE_KEY][key] = clone(value);
+            changed = true;
         }
+    }
+
+    if (changed && typeof context.saveSettingsDebounced === 'function') {
+        setTimeout(() => context.saveSettingsDebounced(), 0);
     }
 
     return root[MODULE_KEY];
@@ -110,7 +169,7 @@ function getGoalSettings() {
 function defaultChatState() {
     const settings = getSettings();
     return {
-        version: 1,
+        version: 2,
         summary: '',
         compactionCount: 0,
         lastCompactedAt: null,
@@ -120,7 +179,8 @@ function defaultChatState() {
         autoSnoozeUntilVisibleCount: 0,
         overridesEnabled: false,
         overrides: {
-            thresholdTokens: settings.thresholdTokens,
+            contextPresetTokens: settings.contextPresetTokens,
+            triggerPercent: settings.triggerPercent,
             keepRecentTokens: settings.keepRecentTokens,
             summaryTargetTokens: settings.summaryTargetTokens,
             maxInputTokens: settings.maxInputTokens,
@@ -140,30 +200,106 @@ function getChatState(create = true) {
     const state = context.chatMetadata[CHAT_KEY];
     if (!state) return null;
 
+    let changed = state.version !== 2;
     const defaults = defaultChatState();
     for (const [key, value] of Object.entries(defaults)) {
-        if (state[key] === undefined) state[key] = clone(value);
+        if (state[key] === undefined) {
+            state[key] = clone(value);
+            changed = true;
+        }
     }
     if (!state.overrides || typeof state.overrides !== 'object') {
         state.overrides = clone(defaults.overrides);
+        changed = true;
+    }
+    if (state.overrides.contextPresetTokens === undefined) {
+        state.overrides.contextPresetTokens = nearestContextPresetForThreshold(state.overrides.thresholdTokens);
+        changed = true;
+    }
+    if (state.overrides.triggerPercent === undefined) {
+        state.overrides.triggerPercent = DEFAULT_TRIGGER_PERCENT;
+        changed = true;
     }
     for (const [key, value] of Object.entries(defaults.overrides)) {
-        if (state.overrides[key] === undefined) state.overrides[key] = clone(value);
+        if (state.overrides[key] === undefined) {
+            state.overrides[key] = clone(value);
+            changed = true;
+        }
+    }
+    state.version = 2;
+    if (changed && typeof context.saveMetadataDebounced === 'function') {
+        setTimeout(() => context.saveMetadataDebounced(), 0);
     }
     return state;
 }
 
-function getEffectiveSettings() {
+function resolveContextWindowTokens(source, maxPromptTokens = null) {
+    const configured = clampNumber(source.contextPresetTokens, 0, 10000000, 0);
+    if (configured > 0) return configured;
+
+    const context = SillyTavern.getContext();
+    const tavernContext = Number(context.maxContext);
+    if (Number.isFinite(tavernContext) && tavernContext > 0) return Math.round(tavernContext);
+
+    const promptBudget = Number(maxPromptTokens);
+    if (Number.isFinite(promptBudget) && promptBudget > 0) return Math.round(promptBudget);
+    try {
+        const fallback = Number(getMaxPromptTokens());
+        if (Number.isFinite(fallback) && fallback > 0) return Math.round(fallback);
+    } catch {
+        // Fall through to the safest built-in preset.
+    }
+    return CONTEXT_PRESETS[0];
+}
+
+function getEffectiveSettings(maxPromptTokens = null) {
     const global = getSettings();
     const state = getChatState(false);
     const source = state?.overridesEnabled ? { ...global, ...state.overrides } : global;
 
+    let promptBudget = Number(maxPromptTokens);
+    if (!Number.isFinite(promptBudget) || promptBudget <= 0) {
+        try {
+            promptBudget = Number(getMaxPromptTokens());
+        } catch {
+            promptBudget = NaN;
+        }
+    }
+
+    const contextWindowTokens = resolveContextWindowTokens(source, promptBudget);
+    const triggerPercent = clampNumber(source.triggerPercent, 50, 98, DEFAULT_TRIGGER_PERCENT);
+    const configuredThreshold = Math.max(1000, Math.round(contextWindowTokens * triggerPercent / 100));
+    const promptSafetyThreshold = Number.isFinite(promptBudget) && promptBudget > 0
+        ? Math.max(1000, Math.floor(promptBudget * 0.98))
+        : configuredThreshold;
+    const thresholdTokens = Math.min(configuredThreshold, promptSafetyThreshold);
+
+    // Defaults scale down automatically on smaller contexts so a compact pass
+    // always creates meaningful headroom instead of replacing history with an
+    // oversized recent tail or summary.
+    const sizingContextTokens = Number.isFinite(promptBudget) && promptBudget > 0
+        ? Math.min(contextWindowTokens, promptBudget)
+        : contextWindowTokens;
+    const keepRecentCap = Math.max(2048, Math.round(sizingContextTokens * 0.18));
+    const summaryTargetCap = Math.max(1024, Math.round(sizingContextTokens * 0.04));
+    const keepRecentTokens = Math.min(
+        clampNumber(source.keepRecentTokens, 0, 2000000, DEFAULT_SETTINGS.keepRecentTokens),
+        keepRecentCap,
+    );
+    const summaryTargetTokens = Math.min(
+        clampNumber(source.summaryTargetTokens, 256, 131072, DEFAULT_SETTINGS.summaryTargetTokens),
+        summaryTargetCap,
+    );
+
     return {
         autoEnabled: Boolean(global.autoEnabled),
         showMarker: Boolean(global.showMarker),
-        thresholdTokens: clampNumber(source.thresholdTokens, 1000, 10000000, DEFAULT_SETTINGS.thresholdTokens),
-        keepRecentTokens: clampNumber(source.keepRecentTokens, 0, 2000000, DEFAULT_SETTINGS.keepRecentTokens),
-        summaryTargetTokens: clampNumber(source.summaryTargetTokens, 256, 131072, DEFAULT_SETTINGS.summaryTargetTokens),
+        contextPresetTokens: clampNumber(source.contextPresetTokens, 0, 10000000, 0),
+        contextWindowTokens,
+        triggerPercent,
+        thresholdTokens,
+        keepRecentTokens,
+        summaryTargetTokens,
         maxInputTokens: clampNumber(source.maxInputTokens, 4096, 4000000, DEFAULT_SETTINGS.maxInputTokens),
         minNewMessagesBetweenAutoCompacts: clampNumber(global.minNewMessagesBetweenAutoCompacts, 1, 100, DEFAULT_SETTINGS.minNewMessagesBetweenAutoCompacts),
         prompt: String(source.prompt || DEFAULT_PROMPT),
@@ -247,6 +383,86 @@ async function estimateActiveContextTokens(activeChat, previousSummary = '') {
         ? `PREVIOUS COMPACTED CONTEXT:\n${summary}\n\nACTIVE CHAT:\n${transcript}`
         : transcript;
     return await countTokens(combined);
+}
+
+function staticPromptSource() {
+    const context = SillyTavern.getContext();
+    const values = new Set();
+    try {
+        const fields = context.getCharacterCardFields?.() || {};
+        for (const key of ['description', 'personality', 'persona', 'scenario', 'mesExamples', 'charDepthPrompt', 'creatorNotes']) {
+            const value = String(fields[key] || '').trim();
+            if (value) values.add(value);
+        }
+    } catch (error) {
+        console.debug(`${LOG_PREFIX} Could not inspect character prompt fields.`, error);
+    }
+
+    for (const [key, prompt] of Object.entries(context.extensionPrompts || {})) {
+        if (key === PROMPT_ID) continue;
+        const value = String(prompt?.value || '').trim();
+        if (value) values.add(value);
+    }
+    return [...values].join('\n\n');
+}
+
+async function estimateStaticPromptTokens() {
+    const identity = getChatIdentity();
+    const source = staticPromptSource();
+    if (staticPromptTokenCache.identity === identity && staticPromptTokenCache.source === source) {
+        return staticPromptTokenCache.tokens;
+    }
+    const tokens = await countTokens(source);
+    staticPromptTokenCache = { identity, source, tokens };
+    return tokens;
+}
+
+function stringifyObservedPrompt(prompt) {
+    if (typeof prompt === 'string') return prompt;
+    if (!Array.isArray(prompt)) return '';
+    return prompt.map((message) => {
+        if (!message || typeof message !== 'object') return String(message || '');
+        const role = String(message.role || message.name || 'message');
+        const content = typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content ?? '');
+        const tools = message.tool_calls ? `\n${JSON.stringify(message.tool_calls)}` : '';
+        return `${role}: ${content}${tools}`;
+    }).join('\n\n');
+}
+
+function observeFinalPrompt(prompt, dryRun = false) {
+    if (dryRun || inCompaction || !activePromptObservation || document.body.dataset.generating !== 'true') return;
+    const promptText = stringifyObservedPrompt(prompt);
+    if (!promptText.trim()) return;
+
+    const observation = { ...activePromptObservation };
+    const context = SillyTavern.getContext();
+    const chatSnapshot = (context.chat || []).map(message => ({
+        name: message?.name,
+        mes: message?.mes,
+        is_user: message?.is_user,
+        is_system: message?.is_system,
+    }));
+    const summarySnapshot = String(getChatState(false)?.summary || '');
+
+    setTimeout(async () => {
+        try {
+            const [promptTokens, activeTokens] = await Promise.all([
+                countTokens(promptText),
+                estimateActiveContextTokens(chatSnapshot, summarySnapshot),
+            ]);
+            promptObservations.set(observation.identity, {
+                promptTokens,
+                activeTokens,
+                overheadTokens: Math.max(0, promptTokens - activeTokens),
+                type: observation.type,
+                observedAt: Date.now(),
+            });
+        } catch (error) {
+            console.debug(`${LOG_PREFIX} Could not observe finalized prompt size.`, error);
+        }
+    }, 0);
 }
 
 async function validateCompactedSummary(summary, sourceText) {
@@ -596,7 +812,8 @@ async function statusText() {
     const state = getChatState(false);
     const summaryTokens = state?.summary ? await countTokens(state.summary) : 0;
     const hidden = hiddenByCompactCount();
-    return `CC Compact: auto=${settings.autoEnabled ? 'on' : 'off'}, threshold=${settings.thresholdTokens}, hidden=${hidden}, summary≈${summaryTokens} tokens, compactions=${state?.compactionCount || 0}, last=${state?.lastTrigger || 'never'}.`;
+    const observedOverhead = Number(promptObservations.get(getChatIdentity())?.overheadTokens || 0);
+    return `CC Compact: auto=${settings.autoEnabled ? 'on' : 'off'}, context=${settings.contextWindowTokens}, trigger=${settings.triggerPercent}% (~${settings.thresholdTokens}), observed non-chat≈${observedOverhead}, hidden=${hidden}, summary≈${summaryTokens}, compactions=${state?.compactionCount || 0}, last=${state?.lastTrigger || 'never'}.`;
 }
 
 function parseGoalPrompts(value) {
@@ -625,6 +842,20 @@ function setGoalComposerText(text) {
     return composer.value;
 }
 
+async function sendGoalComposerText() {
+    await new Promise(resolve => requestAnimationFrame(() => resolve()));
+    const sendButton = document.querySelector('#send_but');
+    if (!(sendButton instanceof HTMLElement)) {
+        throw new Error('SillyTavern send button was not found.');
+    }
+    if (document.body.dataset.generating === 'true'
+        || sendButton.classList.contains('disabled')
+        || sendButton.getAttribute('aria-disabled') === 'true') {
+        throw new Error('SillyTavern is still generating or is not connected. The Goal draft was left in the input box.');
+    }
+    sendButton.click();
+}
+
 function buildGoalLiteTranscript() {
     const context = SillyTavern.getContext();
     const messages = (context.chat || [])
@@ -640,13 +871,14 @@ function buildGoalLiteTranscript() {
         const message = messages[index];
         const speaker = message.is_user ? 'U' : 'A';
         const body = String(message.mes).trim();
-        const remaining = GOAL_LITE_INPUT_CHAR_BUDGET - usedCharacters - 2;
+        const separatorLength = selected.length ? 1 : 0;
+        const remaining = GOAL_LITE_INPUT_CHAR_BUDGET - usedCharacters - 2 - separatorLength;
         if (remaining <= 0) break;
         const excerpt = body.length > remaining
             ? (remaining === 1 ? '…' : `…${body.slice(-(remaining - 1))}`)
             : body;
         selected.unshift(`${speaker}:${excerpt}`);
-        usedCharacters += excerpt.length + 2;
+        usedCharacters += excerpt.length + 2 + separatorLength;
     }
     return selected.join('\n');
 }
@@ -730,7 +962,7 @@ async function runGoalAction(actionSettings, previewPrompt = '') {
         }
 
         if (actionSettings.autoSend) {
-            await Generate('normal');
+            await sendGoalComposerText();
         } else {
             toastr.success('Goal draft placed in the message input.', 'CC Goal');
         }
@@ -892,21 +1124,28 @@ function openGoalPopup() {
 }
 
 // SillyTavern calls this before it finishes assembling the outgoing prompt.
-// IMPORTANT: the second argument is the *maximum prompt budget*, not current usage.
-// We therefore count the active chat ourselves for the configurable auto threshold.
-globalThis.CompactGenerationInterceptor = async function CompactGenerationInterceptor(chat, _maxPromptTokens, _abort, type) {
+// The second argument is the prompt budget, not current usage. The finalized
+// request is token-counted separately so injected overhead can be budgeted on
+// the next turn without retaining or summarizing any preset text.
+globalThis.CompactGenerationInterceptor = async function CompactGenerationInterceptor(chat, maxPromptTokens, _abort, type) {
     if (inCompaction || type === 'quiet') return;
 
     // Re-anchor an existing compact state before every generation so it always sits
     // immediately before the retained/new chat tail, even as that tail grows.
     syncSummaryInjection(chat);
 
-    const settings = getEffectiveSettings();
+    const settings = getEffectiveSettings(maxPromptTokens);
     if (!settings.autoEnabled) return;
 
     const state = getChatState(true);
-    const activeTokens = await estimateActiveContextTokens(chat, state.summary);
-    if (activeTokens < settings.thresholdTokens) return;
+    const [chatTokens, staticPromptTokens] = await Promise.all([
+        estimateActiveContextTokens(chat, state.summary),
+        estimateStaticPromptTokens(),
+    ]);
+    const observed = promptObservations.get(getChatIdentity());
+    const overheadTokens = Math.max(staticPromptTokens, Number(observed?.overheadTokens || 0));
+    const projectedTokens = chatTokens + overheadTokens;
+    if (projectedTokens < settings.thresholdTokens) return;
 
     const visibleCount = Array.isArray(chat) ? chat.length : 0;
     const minimumGrowth = settings.minNewMessagesBetweenAutoCompacts;
@@ -916,7 +1155,7 @@ globalThis.CompactGenerationInterceptor = async function CompactGenerationInterc
     if (state.autoSnoozeUntilVisibleCount && visibleCount < state.autoSnoozeUntilVisibleCount) return;
     if (state.lastAutoVisibleCount && visibleCount < state.lastAutoVisibleCount + minimumGrowth) return;
 
-    const result = await compactContext('automatic', { tokensBefore: activeTokens });
+    const result = await compactContext('automatic', { tokensBefore: projectedTokens });
     if (!result.success) {
         state.autoSnoozeUntilVisibleCount = visibleCount + minimumGrowth;
         if (SillyTavern.getContext().saveMetadata) await SillyTavern.getContext().saveMetadata();
@@ -936,27 +1175,62 @@ globalThis.CompactGenerationInterceptor = async function CompactGenerationInterc
 function setDisabledState() {
     const enabled = $('#compact-chat-override-enabled').prop('checked');
     $('#compact-chat-overrides, #compact-chat-prompt').toggleClass('compact-disabled', !enabled);
-    $('#compact-chat-overrides input, #compact-chat-prompt').prop('disabled', !enabled);
+    $('#compact-chat-overrides :input, #compact-chat-prompt').prop('disabled', !enabled);
+    const customSelected = $('#compact-chat-context-preset').val() === 'custom';
+    $('#compact-chat-context-custom').closest('label').toggle(customSelected);
+    $('#compact-chat-context-custom').prop('disabled', !enabled || !customSelected);
+}
+
+function setContextPresetUi(selectSelector, customSelector, value) {
+    const numeric = clampNumber(value, 0, 10000000, 0);
+    const isPreset = numeric === 0 || CONTEXT_PRESETS.includes(numeric);
+    $(selectSelector).val(isPreset ? String(numeric) : 'custom');
+    $(customSelector).val(numeric > 0 ? numeric : '');
+    if (customSelector === '#compact-context-custom') {
+        $(customSelector).toggle(!isPreset);
+    }
+}
+
+function updateThresholdPreview() {
+    const settings = getSettings();
+    let promptBudget = NaN;
+    try {
+        promptBudget = Number(getMaxPromptTokens());
+    } catch {
+        // Preview can still use the selected total context.
+    }
+    const contextWindow = resolveContextWindowTokens(settings, promptBudget);
+    const percent = clampNumber(settings.triggerPercent, 50, 98, DEFAULT_TRIGGER_PERCENT);
+    const configured = Math.round(contextWindow * percent / 100);
+    const effective = Number.isFinite(promptBudget) && promptBudget > 0
+        ? Math.min(configured, Math.floor(promptBudget * 0.98))
+        : configured;
+    const source = Number(settings.contextPresetTokens) > 0 ? 'selected context' : 'current SillyTavern context';
+    const safety = effective < configured ? ' · capped by the active backend prompt limit' : '';
+    $('#compact-threshold-preview').text(`Starts at ~${effective.toLocaleString()} tokens (${percent}% of ${contextWindow.toLocaleString()}, ${source})${safety}.`);
 }
 
 function loadGlobalUi() {
     const settings = getSettings();
     $('#compact-auto-enabled').prop('checked', Boolean(settings.autoEnabled));
     $('#compact-show-marker').prop('checked', Boolean(settings.showMarker));
-    $('#compact-threshold').val(settings.thresholdTokens);
+    setContextPresetUi('#compact-context-preset', '#compact-context-custom', settings.contextPresetTokens);
+    $('#compact-trigger-percent').val(settings.triggerPercent);
     $('#compact-keep-recent').val(settings.keepRecentTokens);
     $('#compact-summary-target').val(settings.summaryTargetTokens);
     $('#compact-max-input').val(settings.maxInputTokens);
     $('#compact-min-new-messages').val(settings.minNewMessagesBetweenAutoCompacts);
     $('#compact-prompt').val(settings.prompt);
     $('#compact-injection-template').val(settings.injectionTemplate);
+    updateThresholdPreview();
 }
 
 async function updateChatUi() {
     const state = getChatState(false);
     const settings = getSettings();
     const overrides = state?.overrides || {
-        thresholdTokens: settings.thresholdTokens,
+        contextPresetTokens: settings.contextPresetTokens,
+        triggerPercent: settings.triggerPercent,
         keepRecentTokens: settings.keepRecentTokens,
         summaryTargetTokens: settings.summaryTargetTokens,
         maxInputTokens: settings.maxInputTokens,
@@ -964,7 +1238,8 @@ async function updateChatUi() {
     };
 
     $('#compact-chat-override-enabled').prop('checked', Boolean(state?.overridesEnabled));
-    $('#compact-chat-threshold').val(overrides.thresholdTokens);
+    setContextPresetUi('#compact-chat-context-preset', '#compact-chat-context-custom', overrides.contextPresetTokens);
+    $('#compact-chat-trigger-percent').val(overrides.triggerPercent);
     $('#compact-chat-keep-recent').val(overrides.keepRecentTokens);
     $('#compact-chat-summary-target').val(overrides.summaryTargetTokens);
     $('#compact-chat-max-input').val(overrides.maxInputTokens);
@@ -999,8 +1274,29 @@ function bindSettingsUi() {
         saveGlobal();
     });
 
+    $('#compact-context-preset').off('.compact').on('change.compact', function () {
+        const settings = getSettings();
+        const value = String($(this).val());
+        if (value === 'custom') {
+            const fallback = clampNumber(SillyTavern.getContext().maxContext, 4096, 10000000, CONTEXT_PRESETS[0]);
+            const custom = clampNumber($('#compact-context-custom').val(), 4096, 10000000, fallback);
+            $('#compact-context-custom').val(custom).show().focus();
+            settings.contextPresetTokens = custom;
+        } else {
+            $('#compact-context-custom').hide();
+            settings.contextPresetTokens = Number(value);
+        }
+        updateThresholdPreview();
+        saveGlobal();
+    });
+    $('#compact-context-custom').off('.compact').on('input.compact', debounce(function () {
+        getSettings().contextPresetTokens = clampNumber($(this).val(), 4096, 10000000, CONTEXT_PRESETS[0]);
+        updateThresholdPreview();
+        saveGlobal();
+    }));
+
     const globalNumberBindings = [
-        ['#compact-threshold', 'thresholdTokens'],
+        ['#compact-trigger-percent', 'triggerPercent'],
         ['#compact-keep-recent', 'keepRecentTokens'],
         ['#compact-summary-target', 'summaryTargetTokens'],
         ['#compact-max-input', 'maxInputTokens'],
@@ -1009,6 +1305,7 @@ function bindSettingsUi() {
     for (const [selector, key] of globalNumberBindings) {
         $(selector).off('.compact').on('change.compact', function () {
             getSettings()[key] = Number($(this).val());
+            if (key === 'triggerPercent') updateThresholdPreview();
             saveGlobal();
         });
     }
@@ -1046,6 +1343,7 @@ function bindSettingsUi() {
         const goalSettings = clone(getGoalSettings());
         Object.assign(settings, clone(DEFAULT_SETTINGS));
         settings.goal = goalSettings;
+        delete settings.thresholdTokens;
         loadGlobalUi();
         syncSummaryInjection();
         saveGlobal();
@@ -1060,8 +1358,28 @@ function bindSettingsUi() {
         if (SillyTavern.getContext().saveMetadata) await SillyTavern.getContext().saveMetadata();
     });
 
+    $('#compact-chat-context-preset').off('.compact').on('change.compact', function () {
+        const state = getChatState(true);
+        const value = String($(this).val());
+        if (value === 'custom') {
+            const fallback = clampNumber(SillyTavern.getContext().maxContext, 4096, 10000000, CONTEXT_PRESETS[0]);
+            const custom = clampNumber($('#compact-chat-context-custom').val(), 4096, 10000000, fallback);
+            $('#compact-chat-context-custom').val(custom);
+            state.overrides.contextPresetTokens = custom;
+        } else {
+            state.overrides.contextPresetTokens = Number(value);
+        }
+        setDisabledState();
+        saveChatDebounced();
+    });
+    $('#compact-chat-context-custom').off('.compact').on('input.compact', debounce(function () {
+        const state = getChatState(true);
+        state.overrides.contextPresetTokens = clampNumber($(this).val(), 4096, 10000000, CONTEXT_PRESETS[0]);
+        saveChatDebounced();
+    }));
+
     const chatNumberBindings = [
-        ['#compact-chat-threshold', 'thresholdTokens'],
+        ['#compact-chat-trigger-percent', 'triggerPercent'],
         ['#compact-chat-keep-recent', 'keepRecentTokens'],
         ['#compact-chat-summary-target', 'summaryTargetTokens'],
         ['#compact-chat-max-input', 'maxInputTokens'],
@@ -1165,10 +1483,36 @@ async function initialize() {
 
     const { eventSource, event_types } = SillyTavern.getContext();
     eventSource.on(event_types.CHAT_CHANGED, async () => {
+        activePromptObservation = null;
+        staticPromptTokenCache = { identity: '', source: '', tokens: 0 };
         syncSummaryInjection();
+        updateThresholdPreview();
         await updateChatUi();
         setTimeout(decorateMessages, 0);
     });
+    if (event_types.SETTINGS_UPDATED) {
+        eventSource.on(event_types.SETTINGS_UPDATED, updateThresholdPreview);
+    }
+
+    if (event_types.GENERATION_STARTED) {
+        eventSource.on(event_types.GENERATION_STARTED, (type) => {
+            activePromptObservation = { identity: getChatIdentity(), type: String(type || 'normal') };
+        });
+    }
+    if (event_types.GENERATE_AFTER_COMBINE_PROMPTS) {
+        eventSource.on(event_types.GENERATE_AFTER_COMBINE_PROMPTS, eventData => {
+            observeFinalPrompt(eventData?.prompt, Boolean(eventData?.dryRun));
+        });
+    }
+    if (event_types.CHAT_COMPLETION_PROMPT_READY) {
+        eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, eventData => {
+            observeFinalPrompt(eventData?.chat, Boolean(eventData?.dryRun));
+        });
+    }
+    for (const eventName of ['GENERATION_ENDED', 'GENERATION_STOPPED']) {
+        const event = event_types[eventName];
+        if (event) eventSource.on(event, () => { activePromptObservation = null; });
+    }
 
     // Re-apply marker/history classes as messages are rendered or chat DOM changes.
     for (const eventName of ['CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED', 'MESSAGE_UPDATED', 'MESSAGE_SWIPED']) {
@@ -1176,7 +1520,8 @@ async function initialize() {
         if (event) eventSource.on(event, () => setTimeout(decorateMessages, 0));
     }
 
-    console.info(`${LOG_PREFIX} Ready. Auto threshold: ${getSettings().thresholdTokens.toLocaleString()} tokens.`);
+    const effective = getEffectiveSettings();
+    console.info(`${LOG_PREFIX} Ready. Context: ${effective.contextWindowTokens.toLocaleString()} tokens; auto trigger: ${effective.thresholdTokens.toLocaleString()} (${effective.triggerPercent}%).`);
 }
 
 jQuery(async () => {

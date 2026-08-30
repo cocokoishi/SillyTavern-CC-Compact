@@ -48,7 +48,8 @@
 
 .compact-disabled-group.compact-disabled,
 .compact-disabled-group.compact-disabled textarea,
-.compact-disabled-group.compact-disabled input {
+.compact-disabled-group.compact-disabled input,
+.compact-disabled-group.compact-disabled select {
     opacity: 0.58;
 }
 
@@ -110,6 +111,34 @@
 .compact-advanced > summary {
     cursor: pointer;
     margin-bottom: 0.55rem;
+}
+
+.compact-primary-setting {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.75rem;
+    border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+    border-radius: 0.55rem;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 6%, transparent);
+}
+
+.compact-primary-setting .text_pole {
+    width: 100%;
+}
+
+.compact-context-custom {
+    display: none;
+}
+
+.compact-primary-actions {
+    justify-content: flex-start;
+}
+
+.compact-advanced-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
 }
 
 .cc-goal-panel {

@@ -1,11 +1,11 @@
 # CC Compact for SillyTavern
 
-> **v1.2.0:** adds `/goal`, a persistent three-mode interface for sending a saved random prompt, using SillyTavern's native impersonate, or creating a lightweight CC impersonate draft in one request of no more than 100 characters.
+> **v1.3.0:** simplifies Compact to one context-window selector, triggers at 90% by default, observes real finalized prompt sizes for injected-context overhead, and restricts compacted memory to fictional world and plot continuity. Chat Completion Preset text is never stored, summarized, or injected.
 
 
 A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
 
-**Default behavior:** when the prompt for the next generation reaches **250,000 tokens**, Compact folds old chat history into a dense persistent summary, keeps a recent tail verbatim, removes the folded source messages from the model prompt without deleting them from the chat, and then lets the original generation continue.
+**Default behavior:** Compact follows SillyTavern's current context size and runs when the projected next prompt reaches **90%**. It folds old chat history into dense story memory, keeps a recent tail verbatim, removes folded source messages from the model prompt without deleting them from the chat, and then lets the original generation continue.
 
 After compaction the chat timeline shows one of these markers:
 
@@ -21,7 +21,8 @@ The state is **per chat/session**. Switching chats restores that chat's own comp
 - `/compact status` — show current threshold, hidden-message count, summary size, and last compaction.
 - `/compact reset` — clear the compacted summary and put messages hidden by this extension back into the model context.
 - `/goal` — open the Goal interface with random prompt, native impersonate, and lightweight CC impersonate modes.
-- Automatic compaction before generation, default threshold: **250k tokens**.
+- Automatic compaction before generation at **90% of the selected context window**.
+- Built-in context presets: `32766`, `65536`, `131072`, `262144`, `400000`, and `500000`, plus automatic and custom modes.
 - Global settings plus optional **per-chat overrides**.
 - Editable compaction prompt.
 - Editable current compacted context.
@@ -52,34 +53,26 @@ Requires **SillyTavern 1.18.0 or newer**.
 Compact deliberately does more than a normal "summary memory" extension.
 
 1. SillyTavern calls Compact's generation interceptor before building a real generation request.
-2. If the upcoming context is at/above the configured threshold, Compact selects old visible messages while preserving a recent tail (24k tokens by default).
-3. The selected model summarizes those messages. Very large histories are processed in chunks, with each chunk folded into the previous compacted state.
-4. Only after a valid summary is returned, those source messages are marked hidden-from-prompt using SillyTavern's native hidden-message mechanism (`is_system=true`). They remain in the chat file and stay readable in the UI.
-5. The compacted summary is stored in the current chat's metadata and injected back into the prompt as a system context block.
-6. A hidden system event is added to the visible timeline: `Context automatically compacted` or `Context manually compacted`.
-7. The generation that triggered automatic compaction then proceeds using the compacted context.
+2. Compact counts active chat and story memory, adds known character/lore injections, and uses the numeric overhead observed from finalized prompts on earlier turns. This lets it account for prompt additions without ever storing their text.
+3. At the configured percentage, Compact selects old visible messages while preserving an adaptively sized recent tail.
+4. The selected model summarizes only the old chat transcript and previous story memory. Very large histories are processed in chunks.
+5. Only after a valid summary is returned, those source messages are marked hidden-from-prompt using SillyTavern's native hidden-message mechanism (`is_system=true`). They remain in the chat file and stay readable in the UI.
+6. The story memory is stored in the current chat's metadata and inserted at the boundary before the retained recent chat.
+7. A hidden system event is added to the visible timeline, then the triggering generation continues using the compacted context.
 
 This means the old messages no longer consume model context after a successful compaction. The summary is not merely appended on top of the still-full history.
 
 ## Settings
 
-### Global
+The normal interface contains one setting: **Context window**. Choose **Follow SillyTavern**, one of the six built-in presets, or a custom size. Automatic compaction begins at 90% by default and is capped by the active backend's real prompt limit.
 
-| Setting | Default | Meaning |
-|---|---:|---|
-| Automatic compaction | On | Run compaction before a normal generation when the threshold is reached. |
-| Auto threshold | `250000` tokens | Upcoming prompt size that triggers automatic compaction. |
-| Keep recent | `24000` tokens | Approximate amount of newest visible chat kept verbatim. |
-| Summary target | `8192` tokens | Maximum requested output length for each compaction pass. |
-| Max input / summary request | `160000` tokens | Upper bound for transcript material sent in one chunk; Compact also clamps this to the active model context. |
-| Min new messages before re-compact | `3` | Anti-loop guard: after an automatic compact, require this many new visible messages before another automatic compact. |
-| Compaction prompt | Built in | Instructions used to build the dense continuation state. Fully editable. |
-| Summary injection template | Built in | Advanced template used to inject the persistent compacted state. Must contain `{{summary}}`. |
-| Show marker | On | Add compact event markers to the chat timeline. |
+Everything else is folded under **Advanced settings and current chat**. Advanced controls include trigger percentage, recent-tail budget, summary target, chunk input limit, anti-loop guard, story-memory prompt, injection template, and per-chat overrides. Recent-tail and summary targets are automatically capped on smaller contexts so compaction always frees useful space.
+
+The default prompt preserves only fictional characters, relationships, locations, events, lore, inventory, current scene state, and unresolved plot threads. It explicitly discards Chat Completion Presets, jailbreaks, system/developer controls, API directives, and other out-of-story instructions.
 
 ### Per chat
 
-Enable **Use per-chat settings** to override threshold, recent-tail size, summary target, max input, and compaction prompt for only the current chat. These values travel with that chat's metadata.
+Enable **Use per-chat advanced settings** to override context size, trigger percentage, recent-tail size, summary target, max input, and compaction prompt for only the current chat. These values travel with that chat's metadata.
 
 The **Current compacted context** box is also per-chat and editable. Editing it immediately changes the compacted context injected on the next generation.
 
@@ -93,7 +86,7 @@ Typing:
 /compact
 ```
 
-compacts immediately and ignores the automatic 250k trigger. If the conversation is shorter than the configured `Keep recent` budget, manual mode still folds everything except the newest two visible messages so the command is useful on shorter chats too.
+compacts immediately and ignores the automatic percentage trigger. If the conversation is shorter than the configured recent-tail budget, manual mode still folds everything except the newest two visible messages so the command is useful on shorter chats too.
 
 ## Goal
 
@@ -115,9 +108,9 @@ Compaction markers are retained as audit/history events; they are system message
 
 ## Cost and model behavior
 
-Compaction is a real LLM generation using your currently selected SillyTavern backend. It therefore consumes local compute and/or API tokens according to that backend. A 250k-token conversation may require multiple summary calls if your selected model cannot accept that much input in one request.
+Compaction is a real LLM generation using your currently selected SillyTavern backend. It therefore consumes local compute and/or API tokens according to that backend. Very large conversations may require multiple summary calls if the active model cannot accept all folded history in one request.
 
-Token counts can differ slightly between SillyTavern's tokenizer estimate and a provider's billing tokenizer. The threshold uses the context-size value SillyTavern calculates for the upcoming generation.
+Token counts can differ slightly between SillyTavern's tokenizer estimate and a provider's billing tokenizer. Compact observes finalized prompt token totals in memory to estimate non-chat overhead on the following turn; the prompt text itself is not persisted or sent to the compaction model.
 
 ## Why the anti-loop guard exists
 

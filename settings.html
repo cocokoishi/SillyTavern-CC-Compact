@@ -5,93 +5,23 @@
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-            <div class="compact-row compact-row-checks">
-                <label class="checkbox_label" for="compact-auto-enabled">
-                    <input id="compact-auto-enabled" type="checkbox">
-                    <span>Automatic compaction</span>
-                </label>
-                <label class="checkbox_label" for="compact-show-marker">
-                    <input id="compact-show-marker" type="checkbox">
-                    <span>Show compact event marker</span>
-                </label>
+            <div class="compact-primary-setting">
+                <label for="compact-context-preset"><b>Context window</b></label>
+                <select id="compact-context-preset" class="text_pole">
+                    <option value="0">Follow SillyTavern</option>
+                    <option value="32766">32,766</option>
+                    <option value="65536">65,536</option>
+                    <option value="131072">131,072</option>
+                    <option value="262144">262,144</option>
+                    <option value="400000">400,000</option>
+                    <option value="500000">500,000</option>
+                    <option value="custom">Custom…</option>
+                </select>
+                <input id="compact-context-custom" class="text_pole compact-context-custom" type="number" min="4096" max="10000000" step="1024" placeholder="Custom context tokens">
+                <small id="compact-threshold-preview" class="compact-muted">Compacts at 90% of the selected context.</small>
             </div>
 
-            <div class="compact-grid">
-                <label>
-                    <span>Auto threshold (tokens)</span>
-                    <input id="compact-threshold" class="text_pole" type="number" min="1000" step="1000">
-                </label>
-                <label>
-                    <span>Keep recent (tokens)</span>
-                    <input id="compact-keep-recent" class="text_pole" type="number" min="0" step="1000">
-                </label>
-                <label>
-                    <span>Summary target (tokens)</span>
-                    <input id="compact-summary-target" class="text_pole" type="number" min="256" step="256">
-                </label>
-                <label>
-                    <span>Max input / summary request</span>
-                    <input id="compact-max-input" class="text_pole" type="number" min="4096" step="4096">
-                </label>
-                <label>
-                    <span>Min new messages before re-compact</span>
-                    <input id="compact-min-new-messages" class="text_pole" type="number" min="1" max="100" step="1">
-                </label>
-            </div>
-
-            <label for="compact-prompt"><b>Compaction prompt</b></label>
-            <textarea id="compact-prompt" class="text_pole textarea_compact" rows="11"></textarea>
-            <div class="compact-actions">
-                <button id="compact-restore-prompt" class="menu_button">Restore default prompt</button>
-            </div>
-
-            <details class="compact-advanced">
-                <summary><b>Advanced injection settings</b></summary>
-                <label for="compact-injection-template">Summary injection template</label>
-                <textarea id="compact-injection-template" class="text_pole textarea_compact" rows="5"></textarea>
-                <small class="compact-muted">Must contain <code>{{summary}}</code>. This controls how the persistent compacted state is injected into future prompts.</small>
-                <div class="compact-actions">
-                    <button id="compact-restore-injection" class="menu_button">Restore injection template</button>
-                    <button id="compact-restore-all" class="menu_button">Restore all global defaults</button>
-                </div>
-            </details>
-
-            <hr>
-            <div class="compact-chat-heading">
-                <b>Current chat</b>
-                <span id="compact-chat-status" class="compact-muted">No compacted context</span>
-            </div>
-
-            <label class="checkbox_label" for="compact-chat-override-enabled">
-                <input id="compact-chat-override-enabled" type="checkbox">
-                <span>Use per-chat settings</span>
-            </label>
-
-            <div id="compact-chat-overrides" class="compact-grid compact-disabled-group">
-                <label>
-                    <span>Threshold</span>
-                    <input id="compact-chat-threshold" class="text_pole" type="number" min="1000" step="1000">
-                </label>
-                <label>
-                    <span>Keep recent</span>
-                    <input id="compact-chat-keep-recent" class="text_pole" type="number" min="0" step="1000">
-                </label>
-                <label>
-                    <span>Summary target</span>
-                    <input id="compact-chat-summary-target" class="text_pole" type="number" min="256" step="256">
-                </label>
-                <label>
-                    <span>Max input</span>
-                    <input id="compact-chat-max-input" class="text_pole" type="number" min="4096" step="4096">
-                </label>
-            </div>
-            <label for="compact-chat-prompt"><span>Per-chat prompt</span></label>
-            <textarea id="compact-chat-prompt" class="text_pole textarea_compact compact-disabled-group" rows="7"></textarea>
-
-            <label for="compact-current-summary"><b>Current compacted context</b></label>
-            <textarea id="compact-current-summary" class="text_pole textarea_compact" rows="9" placeholder="The per-chat compacted context will appear here."></textarea>
-
-            <div class="compact-actions">
+            <div class="compact-actions compact-primary-actions">
                 <button id="compact-run" class="menu_button menu_button_icon">
                     <i class="fa-solid fa-compress"></i><span>Compact now</span>
                 </button>
@@ -103,9 +33,117 @@
                 </button>
             </div>
 
+            <details class="compact-advanced">
+                <summary><b>Advanced settings and current chat</b></summary>
+                <div class="compact-advanced-content">
+                    <div class="compact-row compact-row-checks">
+                        <label class="checkbox_label" for="compact-auto-enabled">
+                            <input id="compact-auto-enabled" type="checkbox">
+                            <span>Automatic compaction</span>
+                        </label>
+                        <label class="checkbox_label" for="compact-show-marker">
+                            <input id="compact-show-marker" type="checkbox">
+                            <span>Show compact event marker</span>
+                        </label>
+                    </div>
+
+                    <div class="compact-grid">
+                        <label>
+                            <span>Trigger (% of context)</span>
+                            <input id="compact-trigger-percent" class="text_pole" type="number" min="50" max="98" step="1">
+                        </label>
+                        <label>
+                            <span>Keep recent (tokens)</span>
+                            <input id="compact-keep-recent" class="text_pole" type="number" min="0" step="1000">
+                        </label>
+                        <label>
+                            <span>Summary target (tokens)</span>
+                            <input id="compact-summary-target" class="text_pole" type="number" min="256" step="256">
+                        </label>
+                        <label>
+                            <span>Max input / summary request</span>
+                            <input id="compact-max-input" class="text_pole" type="number" min="4096" step="4096">
+                        </label>
+                        <label>
+                            <span>Min new messages before re-compact</span>
+                            <input id="compact-min-new-messages" class="text_pole" type="number" min="1" max="100" step="1">
+                        </label>
+                    </div>
+                    <small class="compact-muted">Recent-tail and summary sizes are automatically capped on smaller context windows to guarantee useful space savings.</small>
+
+                    <label for="compact-prompt"><b>Compaction prompt</b></label>
+                    <textarea id="compact-prompt" class="text_pole textarea_compact" rows="11"></textarea>
+                    <div class="compact-actions">
+                        <button id="compact-restore-prompt" class="menu_button">Restore default prompt</button>
+                    </div>
+
+                    <label for="compact-injection-template">Summary injection template</label>
+                    <textarea id="compact-injection-template" class="text_pole textarea_compact" rows="5"></textarea>
+                    <small class="compact-muted">Must contain <code>{{summary}}</code>. The summary is inserted at the exact boundary before retained chat.</small>
+                    <div class="compact-actions">
+                        <button id="compact-restore-injection" class="menu_button">Restore injection template</button>
+                        <button id="compact-restore-all" class="menu_button">Restore Compact defaults</button>
+                    </div>
+
+                    <hr>
+                    <div class="compact-chat-heading">
+                        <b>Current chat</b>
+                        <span id="compact-chat-status" class="compact-muted">No compacted context</span>
+                    </div>
+
+                    <label class="checkbox_label" for="compact-chat-override-enabled">
+                        <input id="compact-chat-override-enabled" type="checkbox">
+                        <span>Use per-chat advanced settings</span>
+                    </label>
+
+                    <div id="compact-chat-overrides" class="compact-disabled-group">
+                        <div class="compact-grid">
+                            <label>
+                                <span>Context window</span>
+                                <select id="compact-chat-context-preset" class="text_pole">
+                                    <option value="0">Follow SillyTavern</option>
+                                    <option value="32766">32,766</option>
+                                    <option value="65536">65,536</option>
+                                    <option value="131072">131,072</option>
+                                    <option value="262144">262,144</option>
+                                    <option value="400000">400,000</option>
+                                    <option value="500000">500,000</option>
+                                    <option value="custom">Custom…</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Custom context</span>
+                                <input id="compact-chat-context-custom" class="text_pole" type="number" min="4096" max="10000000" step="1024">
+                            </label>
+                            <label>
+                                <span>Trigger percent</span>
+                                <input id="compact-chat-trigger-percent" class="text_pole" type="number" min="50" max="98" step="1">
+                            </label>
+                            <label>
+                                <span>Keep recent</span>
+                                <input id="compact-chat-keep-recent" class="text_pole" type="number" min="0" step="1000">
+                            </label>
+                            <label>
+                                <span>Summary target</span>
+                                <input id="compact-chat-summary-target" class="text_pole" type="number" min="256" step="256">
+                            </label>
+                            <label>
+                                <span>Max input</span>
+                                <input id="compact-chat-max-input" class="text_pole" type="number" min="4096" step="4096">
+                            </label>
+                        </div>
+                    </div>
+                    <label for="compact-chat-prompt"><span>Per-chat prompt</span></label>
+                    <textarea id="compact-chat-prompt" class="text_pole textarea_compact compact-disabled-group" rows="7"></textarea>
+
+                    <label for="compact-current-summary"><b>Current compacted context</b></label>
+                    <textarea id="compact-current-summary" class="text_pole textarea_compact" rows="9" placeholder="The per-chat compacted context will appear here."></textarea>
+                </div>
+            </details>
+
             <small class="compact-muted">
                 Slash commands: <code>/compact</code>, <code>/compact status</code>, <code>/compact reset</code>, <code>/goal</code>.
-                Hidden source messages stay in the chat file; only the model context is replaced by the compacted summary.
+                Only finalized token totals are observed for capacity planning; Chat Completion Preset text is never saved, summarized, or injected by Compact.
             </small>
         </div>
     </div>
