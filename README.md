@@ -1,6 +1,6 @@
 # CC Compact for SillyTavern
 
-> **v1.1.1 correctness fix:** compacted memory is injected as an in-chat SYSTEM message at the exact boundary before the retained recent tail. Automatic thresholding now counts active chat tokens instead of confusing SillyTavern's interceptor max-context argument with current usage. The trigger turn's already-snapshotted history is pruned too, and refusal/empty summaries fail closed without hiding source messages.
+> **v1.2.0:** adds `/goal`, a persistent three-mode interface for sending a saved random prompt, using SillyTavern's native impersonate, or creating a lightweight CC impersonate draft in one request of no more than 100 characters.
 
 
 A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
@@ -20,6 +20,7 @@ The state is **per chat/session**. Switching chats restores that chat's own comp
 - `/compact` — manually compact the current chat.
 - `/compact status` — show current threshold, hidden-message count, summary size, and last compaction.
 - `/compact reset` — clear the compacted summary and put messages hidden by this extension back into the model context.
+- `/goal` — open the Goal interface with random prompt, native impersonate, and lightweight CC impersonate modes.
 - Automatic compaction before generation, default threshold: **250k tokens**.
 - Global settings plus optional **per-chat overrides**.
 - Editable compaction prompt.
@@ -93,6 +94,16 @@ Typing:
 ```
 
 compacts immediately and ignores the automatic 250k trigger. If the conversation is shorter than the configured `Keep recent` budget, manual mode still folds everything except the newest two visible messages so the command is useful on shorter chats too.
+
+## Goal
+
+Type `/goal` to open a three-mode interface. Its selected mode, random prompt library, native impersonate instruction, and auto-send preference are stored in SillyTavern extension settings and survive reloads.
+
+- **Random prompt** picks one non-empty line from the saved prompt library. It avoids immediately repeating the previous prompt when alternatives exist.
+- **SillyTavern impersonate** calls the native `Generate('impersonate')` path, so it uses the active character, lore, prompt formatting, and normal SillyTavern impersonation behavior.
+- **CC impersonate** is deliberately lightweight. It includes at most four recent messages within an 800-character input budget, makes one `generateRaw` request with a 128-token response budget, and limits the final draft to 100 characters.
+
+By default, Goal sends the selected/generated user message immediately and starts the normal character reply. Turn off **Send immediately** to leave the result in SillyTavern's input box for review or editing instead.
 
 ## Persistence and reset
 

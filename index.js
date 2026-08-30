@@ -1,5 +1,6 @@
-import { extension_prompt_roles, extension_prompt_types, getMaxPromptTokens, setExtensionPrompt } from '../../../../script.js';
+import { Generate, extension_prompt_roles, extension_prompt_types, getMaxPromptTokens, setExtensionPrompt } from '../../../../script.js';
 import { renderExtensionTemplateAsync } from '../../../extensions.js';
+import { POPUP_RESULT, POPUP_TYPE, Popup } from '../../../popup.js';
 import { getTokenCountAsync } from '../../../tokenizers.js';
 import { removeReasoningFromString } from '../../../reasoning.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
@@ -11,6 +12,18 @@ const CHAT_KEY = 'compact_v1';
 const PROMPT_ID = 'compact_context';
 const TEMPLATE_PATH = 'third-party/SillyTavern-CC-Compact';
 const LOG_PREFIX = '[CC Compact]';
+
+const GOAL_LITE_SYSTEM_PROMPT = '代替{{user}}回复最后一条消息。结合所给的最近对话，只输出自然、准确、可直接发送的一句短回复，不解释，不列选项，不替{{char}}说话，严格控制在100字以内。';
+const GOAL_LITE_INPUT_CHAR_BUDGET = 800;
+const GOAL_LITE_RESPONSE_TOKENS = 128;
+
+const DEFAULT_GOAL_SETTINGS = Object.freeze({
+    mode: 'random',
+    randomPrompts: '',
+    lastRandomPrompt: '',
+    builtinPrompt: '',
+    autoSend: true,
+});
 
 const DEFAULT_PROMPT = `You are compacting a long SillyTavern conversation into a dense continuation state.
 
@@ -38,10 +51,13 @@ const DEFAULT_SETTINGS = Object.freeze({
     minNewMessagesBetweenAutoCompacts: 3,
     prompt: DEFAULT_PROMPT,
     injectionTemplate: DEFAULT_INJECTION_TEMPLATE,
+    goal: DEFAULT_GOAL_SETTINGS,
 });
 
 let initialized = false;
 let inCompaction = false;
+let activeGoalPopup = null;
+let goalActionRunning = false;
 
 function clone(value) {
     return structuredClone(value);
@@ -75,6 +91,20 @@ function getSettings() {
     }
 
     return root[MODULE_KEY];
+}
+
+function getGoalSettings() {
+    const settings = getSettings();
+    if (!settings.goal || typeof settings.goal !== 'object' || Array.isArray(settings.goal)) {
+        settings.goal = clone(DEFAULT_GOAL_SETTINGS);
+    }
+    for (const [key, value] of Object.entries(DEFAULT_GOAL_SETTINGS)) {
+        if (settings.goal[key] === undefined) settings.goal[key] = clone(value);
+    }
+    if (!['random', 'builtin', 'custom'].includes(settings.goal.mode)) {
+        settings.goal.mode = DEFAULT_GOAL_SETTINGS.mode;
+    }
+    return settings.goal;
 }
 
 function defaultChatState() {
@@ -569,6 +599,298 @@ async function statusText() {
     return `CC Compact: auto=${settings.autoEnabled ? 'on' : 'off'}, threshold=${settings.thresholdTokens}, hidden=${hidden}, summary≈${summaryTokens} tokens, compactions=${state?.compactionCount || 0}, last=${state?.lastTrigger || 'never'}.`;
 }
 
+function parseGoalPrompts(value) {
+    return String(value || '')
+        .split(/\r?\n/)
+        .map(prompt => prompt.trim())
+        .filter(Boolean);
+}
+
+function pickGoalPrompt(prompts, previousPrompt = '') {
+    const alternatives = prompts.length > 1
+        ? prompts.filter(prompt => prompt !== previousPrompt)
+        : prompts;
+    const pool = alternatives.length ? alternatives : prompts;
+    return pool[Math.floor(Math.random() * pool.length)] || '';
+}
+
+function setGoalComposerText(text) {
+    const composer = document.querySelector('#send_textarea');
+    if (!(composer instanceof HTMLTextAreaElement)) {
+        throw new Error('SillyTavern message input was not found.');
+    }
+    composer.value = String(text || '').trim();
+    composer.dispatchEvent(new Event('input', { bubbles: true }));
+    composer.focus();
+    return composer.value;
+}
+
+function buildGoalLiteTranscript() {
+    const context = SillyTavern.getContext();
+    const messages = (context.chat || [])
+        .filter(message => message
+            && !message.extra?.compact_marker
+            && !message.extra?.compact_hidden
+            && !message.is_system
+            && String(message.mes || '').trim());
+
+    const selected = [];
+    let usedCharacters = 0;
+    for (let index = messages.length - 1; index >= 0 && selected.length < 4; index--) {
+        const message = messages[index];
+        const speaker = message.is_user ? 'U' : 'A';
+        const body = String(message.mes).trim();
+        const remaining = GOAL_LITE_INPUT_CHAR_BUDGET - usedCharacters - 2;
+        if (remaining <= 0) break;
+        const excerpt = body.length > remaining
+            ? (remaining === 1 ? '…' : `…${body.slice(-(remaining - 1))}`)
+            : body;
+        selected.unshift(`${speaker}:${excerpt}`);
+        usedCharacters += excerpt.length + 2;
+    }
+    return selected.join('\n');
+}
+
+function normalizeGoalLiteDraft(value) {
+    let draft = removeReasoningFromString(String(value || '')).trim();
+    draft = draft.replace(/^(?:用户|USER|U|{{user}})\s*[:：]\s*/i, '').trim();
+    draft = draft.replace(/\s*\n+\s*/g, ' ');
+    if ((draft.startsWith('“') && draft.endsWith('”')) || (draft.startsWith('"') && draft.endsWith('"'))) {
+        draft = draft.slice(1, -1).trim();
+    }
+    return Array.from(draft).slice(0, 100).join('').trim();
+}
+
+async function runGoalAction(actionSettings, previewPrompt = '') {
+    if (goalActionRunning) {
+        toastr.warning('A Goal action is already running.', 'CC Goal');
+        return;
+    }
+
+    const context = SillyTavern.getContext();
+    if (!context.chatId && !context.groupId && context.characterId == null) {
+        toastr.warning('Open a chat before using /goal.', 'CC Goal');
+        return;
+    }
+
+    const identity = getChatIdentity(context);
+    const mode = actionSettings.mode;
+    let draft = '';
+    let loaderHandle = null;
+
+    try {
+        goalActionRunning = true;
+        if (context.loader?.show) {
+            const message = mode === 'random' ? 'Selecting a saved prompt…' : 'Drafting the next user message…';
+            loaderHandle = context.loader.show({ message, title: 'CC Goal', toastMode: 'static' });
+        }
+
+        if (mode === 'random') {
+            const prompts = parseGoalPrompts(actionSettings.randomPrompts);
+            if (!prompts.length) throw new Error('The random prompt library is empty. Add at least one prompt in /goal.');
+            draft = prompts.includes(previewPrompt)
+                ? previewPrompt
+                : pickGoalPrompt(prompts, actionSettings.lastRandomPrompt);
+            const currentGoalSettings = getGoalSettings();
+            currentGoalSettings.lastRandomPrompt = draft;
+            SillyTavern.getContext().saveSettingsDebounced();
+        } else if (mode === 'builtin') {
+            setGoalComposerText('');
+            const prompt = String(actionSettings.builtinPrompt || '').trim();
+            const options = prompt ? { quiet_prompt: prompt, quietToLoud: true } : {};
+            await Generate('impersonate', options);
+            draft = String(document.querySelector('#send_textarea')?.value || '').trim();
+            if (!draft) throw new Error('SillyTavern impersonate returned an empty message.');
+        } else if (mode === 'custom') {
+            if (typeof context.generateRaw !== 'function') {
+                throw new Error('SillyTavern generateRaw() is unavailable. Update SillyTavern to a current release.');
+            }
+            const recentTranscript = buildGoalLiteTranscript();
+            if (!recentTranscript) throw new Error('There is no recent conversation to reply to.');
+            const raw = await context.generateRaw({
+                prompt: recentTranscript,
+                systemPrompt: GOAL_LITE_SYSTEM_PROMPT,
+                responseLength: GOAL_LITE_RESPONSE_TOKENS,
+                trimNames: true,
+            });
+            draft = normalizeGoalLiteDraft(raw);
+            if (!draft) throw new Error('Custom impersonate returned an empty message.');
+        } else {
+            throw new Error(`Unknown Goal mode: ${mode}`);
+        }
+
+        if (getChatIdentity(SillyTavern.getContext()) !== identity) {
+            throw new Error('The chat changed while Goal was running; the generated message was discarded.');
+        }
+
+        setGoalComposerText(draft);
+        if (loaderHandle?.hide) {
+            await loaderHandle.hide();
+            loaderHandle = null;
+        }
+
+        if (actionSettings.autoSend) {
+            await Generate('normal');
+        } else {
+            toastr.success('Goal draft placed in the message input.', 'CC Goal');
+        }
+    } catch (error) {
+        console.error(`${LOG_PREFIX} Goal action failed`, error);
+        toastr.error(String(error?.message || error), 'CC Goal failed');
+    } finally {
+        goalActionRunning = false;
+        if (loaderHandle?.hide) await loaderHandle.hide();
+    }
+}
+
+function openGoalPopup() {
+    if (activeGoalPopup?.dlg?.isConnected) {
+        activeGoalPopup.dlg.focus();
+        return;
+    }
+
+    const settings = getGoalSettings();
+    const content = $(`
+        <div class="cc-goal-panel">
+            <div class="cc-goal-intro">
+                <h3><i class="fa-solid fa-bullseye"></i> Goal</h3>
+                <p>Choose how to create the next user message. All fields below are saved globally.</p>
+            </div>
+            <div class="cc-goal-mode-list" role="radiogroup" aria-label="Goal mode">
+                <label class="cc-goal-mode-card">
+                    <input type="radio" name="cc-goal-mode" value="random">
+                    <span><b>Random prompt</b><small>Pick one saved line and use it as the user message.</small></span>
+                </label>
+                <label class="cc-goal-mode-card">
+                    <input type="radio" name="cc-goal-mode" value="builtin">
+                    <span><b>SillyTavern impersonate</b><small>Use SillyTavern's native character, lore and prompt pipeline.</small></span>
+                </label>
+                <label class="cc-goal-mode-card">
+                    <input type="radio" name="cc-goal-mode" value="custom">
+                    <span><b>CC impersonate</b><small>One low-token request for a reply under 100 characters.</small></span>
+                </label>
+            </div>
+
+            <section class="cc-goal-mode-panel" data-goal-panel="random">
+                <label for="cc-goal-random-prompts"><b>Prompt library</b></label>
+                <textarea id="cc-goal-random-prompts" class="text_pole" rows="9" placeholder="One prompt per line\nFor example: Ask about the locked door\nSuggest moving to the next location"></textarea>
+                <div class="cc-goal-inline-actions">
+                    <small id="cc-goal-prompt-count" class="compact-muted"></small>
+                    <button id="cc-goal-preview-button" class="menu_button" type="button">
+                        <i class="fa-solid fa-shuffle"></i> Draw preview
+                    </button>
+                </div>
+                <textarea id="cc-goal-preview" class="text_pole" rows="3" readonly placeholder="The drawn prompt will appear here."></textarea>
+            </section>
+
+            <section class="cc-goal-mode-panel" data-goal-panel="builtin">
+                <label for="cc-goal-builtin-prompt"><b>Optional additional instruction</b></label>
+                <textarea id="cc-goal-builtin-prompt" class="text_pole" rows="5" placeholder="Leave empty to use the native impersonate prompt unchanged."></textarea>
+                <small class="compact-muted">This mode calls SillyTavern's own <code>Generate('impersonate')</code>.</small>
+            </section>
+
+            <section class="cc-goal-mode-panel" data-goal-panel="custom">
+                <b>Lightweight CC impersonate</b>
+                <p>Uses only a small recent-chat excerpt and one lightweight request, then returns a directly usable reply of no more than 100 characters.</p>
+                <small class="compact-muted">Fixed for low token use: up to 800 input characters and 128 response tokens.</small>
+            </section>
+
+            <label class="checkbox_label cc-goal-auto-send" for="cc-goal-auto-send">
+                <input id="cc-goal-auto-send" type="checkbox">
+                <span>Send immediately and generate the character reply</span>
+            </label>
+            <small class="compact-muted">If disabled, the selected/generated message is left in the input box for editing.</small>
+
+            <div class="cc-goal-run-row">
+                <button id="cc-goal-run" class="menu_button menu_button_icon" type="button">
+                    <i class="fa-solid fa-play"></i><span>Run Goal</span>
+                </button>
+            </div>
+        </div>
+    `);
+
+    const popup = new Popup(content, POPUP_TYPE.TEXT, '', {
+        wide: true,
+        large: true,
+        allowVerticalScrolling: true,
+        leftAlign: true,
+        okButton: 'Close',
+        cancelButton: false,
+        onClose: () => {
+            if (activeGoalPopup === popup) activeGoalPopup = null;
+        },
+    });
+    activeGoalPopup = popup;
+
+    content.find(`input[name="cc-goal-mode"][value="${settings.mode}"]`).prop('checked', true);
+    content.find('#cc-goal-random-prompts').val(settings.randomPrompts);
+    content.find('#cc-goal-builtin-prompt').val(settings.builtinPrompt);
+    content.find('#cc-goal-auto-send').prop('checked', Boolean(settings.autoSend));
+
+    const refreshPromptCount = () => {
+        const count = parseGoalPrompts(content.find('#cc-goal-random-prompts').val()).length;
+        content.find('#cc-goal-prompt-count').text(`${count} saved prompt${count === 1 ? '' : 's'}`);
+    };
+    const refreshMode = () => {
+        const mode = String(content.find('input[name="cc-goal-mode"]:checked').val() || 'random');
+        content.find('.cc-goal-mode-card').toggleClass('cc-goal-mode-selected', false);
+        content.find(`input[name="cc-goal-mode"][value="${mode}"]`).closest('.cc-goal-mode-card').addClass('cc-goal-mode-selected');
+        content.find('.cc-goal-mode-panel').hide();
+        content.find(`.cc-goal-mode-panel[data-goal-panel="${mode}"]`).show();
+        const labels = { random: 'Draw and run', builtin: 'Run native impersonate', custom: 'Run CC impersonate' };
+        content.find('#cc-goal-run span').text(labels[mode]);
+    };
+    const persistUi = () => {
+        const goal = getGoalSettings();
+        goal.mode = String(content.find('input[name="cc-goal-mode"]:checked').val() || 'random');
+        goal.randomPrompts = String(content.find('#cc-goal-random-prompts').val() || '');
+        goal.builtinPrompt = String(content.find('#cc-goal-builtin-prompt').val() || '');
+        goal.autoSend = Boolean(content.find('#cc-goal-auto-send').prop('checked'));
+        SillyTavern.getContext().saveSettingsDebounced();
+    };
+    const persistUiDebounced = debounce(persistUi, 350);
+
+    content.find('input[name="cc-goal-mode"]').on('change', () => {
+        refreshMode();
+        persistUi();
+    });
+    content.find('#cc-goal-random-prompts').on('input', () => {
+        content.find('#cc-goal-preview').val('');
+        refreshPromptCount();
+        persistUiDebounced();
+    });
+    content.find('#cc-goal-builtin-prompt').on('input', persistUiDebounced);
+    content.find('#cc-goal-auto-send').on('change', persistUi);
+    content.find('#cc-goal-preview-button').on('click', () => {
+        const prompts = parseGoalPrompts(content.find('#cc-goal-random-prompts').val());
+        if (!prompts.length) {
+            toastr.warning('Add at least one line to the prompt library.', 'CC Goal');
+            return;
+        }
+        const preview = pickGoalPrompt(prompts, String(content.find('#cc-goal-preview').val() || settings.lastRandomPrompt));
+        content.find('#cc-goal-preview').val(preview);
+    });
+    content.find('#cc-goal-run').on('click', async () => {
+        persistUi();
+        const actionSettings = clone(getGoalSettings());
+        if (actionSettings.mode === 'random' && !parseGoalPrompts(actionSettings.randomPrompts).length) {
+            toastr.warning('Add at least one line to the prompt library.', 'CC Goal');
+            return;
+        }
+        const preview = String(content.find('#cc-goal-preview').val() || '').trim();
+        await popup.complete(POPUP_RESULT.AFFIRMATIVE);
+        setTimeout(() => runGoalAction(actionSettings, preview), 50);
+    });
+
+    refreshPromptCount();
+    refreshMode();
+    popup.show().catch((error) => {
+        activeGoalPopup = null;
+        console.error(`${LOG_PREFIX} Goal popup failed`, error);
+        toastr.error(String(error?.message || error), 'CC Goal failed to open');
+    });
+}
+
 // SillyTavern calls this before it finishes assembling the outgoing prompt.
 // IMPORTANT: the second argument is the *maximum prompt budget*, not current usage.
 // We therefore count the active chat ourselves for the configurable auto threshold.
@@ -721,7 +1043,9 @@ function bindSettingsUi() {
     });
     $('#compact-restore-all').off('.compact').on('click.compact', () => {
         const settings = getSettings();
+        const goalSettings = clone(getGoalSettings());
         Object.assign(settings, clone(DEFAULT_SETTINGS));
+        settings.goal = goalSettings;
         loadGlobalUi();
         syncSummaryInjection();
         saveGlobal();
@@ -765,6 +1089,7 @@ function bindSettingsUi() {
     }, 500));
 
     $('#compact-run').off('.compact').on('click.compact', () => compactContext('manual'));
+    $('#compact-open-goal').off('.compact').on('click.compact', openGoalPopup);
     $('#compact-reset').off('.compact').on('click.compact', async () => {
         if (!confirm('Reset Compact for this chat? This restores messages hidden by Compact to the model context and clears the compacted summary.')) return;
         await resetCurrentChat();
@@ -800,6 +1125,21 @@ function registerSlashCommands() {
             new SlashCommandArgument('optional action: now, status, or reset', [ARGUMENT_TYPE.STRING], false, false, ''),
         ],
         helpString: 'Compacts old messages into persistent per-chat context. Use <code>/compact status</code> to inspect state or <code>/compact reset</code> to restore source messages.',
+        returns: ARGUMENT_TYPE.STRING,
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'goal',
+        callback: async (_args, value) => {
+            if (String(value || '').trim()) {
+                const text = 'Usage: /goal';
+                toastr.warning(text, 'CC Goal');
+                return text;
+            }
+            openGoalPopup();
+            return '';
+        },
+        helpString: 'Opens the Goal interface for a saved random prompt, SillyTavern native impersonate, or CC impersonate.',
         returns: ARGUMENT_TYPE.STRING,
     }));
 }
