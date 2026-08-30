@@ -1,6 +1,6 @@
 # CC Compact for SillyTavern
 
-> **v1.3.1:** fixes `/goal` on clients whose native Popup path throws a null `contains` error by using an extension-owned lightweight overlay. It also simplifies Compact to one context-window selector, triggers at 90% by default, and restricts compacted memory to fictional world and plot continuity. Chat Completion Preset text is never stored, summarized, or injected.
+> **v1.3.3:** fixes `/goal` on reasoning models by leaving the complete reasoning/output budget untouched and using the returned response content directly, without truncating or imposing a final character limit.
 
 
 A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
@@ -94,7 +94,7 @@ Type `/goal` to open a three-mode interface. Its selected mode, random prompt li
 
 - **Random prompt** picks one non-empty line from the saved prompt library. It avoids immediately repeating the previous prompt when alternatives exist.
 - **SillyTavern impersonate** calls the native `Generate('impersonate')` path, so it uses the active character, lore, prompt formatting, and normal SillyTavern impersonation behavior.
-- **CC impersonate** is deliberately lightweight. It includes at most four recent messages within an 800-character input budget, makes one `generateRaw` request with a 128-token response budget, and limits the final draft to 100 characters.
+- **CC impersonate** is deliberately lightweight. It includes at most four recent messages within an 800-character input budget and makes one `generateRaw` request. Reasoning and response length use the active SillyTavern/model settings; the returned response content is used directly without truncation.
 
 By default, Goal sends the selected/generated user message immediately and starts the normal character reply. Turn off **Send immediately** to leave the result in SillyTavern's input box for review or editing instead.
 

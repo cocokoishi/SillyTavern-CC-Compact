@@ -14,9 +14,8 @@ const LOG_PREFIX = '[CC Compact]';
 const CONTEXT_PRESETS = Object.freeze([32766, 65536, 131072, 262144, 400000, 500000]);
 const DEFAULT_TRIGGER_PERCENT = 90;
 
-const GOAL_LITE_SYSTEM_PROMPT = '代替{{user}}回复最后一条消息。结合所给的最近对话，只输出自然、准确、可直接发送的一句短回复，不解释，不列选项，不替{{char}}说话，严格控制在100字以内。';
+const GOAL_LITE_SYSTEM_PROMPT = '代替{{user}}回复最后一条消息。结合所给的最近对话，只输出自然、准确、可直接发送的回复正文，不解释，不列选项，不替{{char}}说话。';
 const GOAL_LITE_INPUT_CHAR_BUDGET = 800;
-const GOAL_LITE_RESPONSE_TOKENS = 128;
 
 const DEFAULT_GOAL_SETTINGS = Object.freeze({
     mode: 'random',
@@ -882,16 +881,6 @@ function buildGoalLiteTranscript() {
     return selected.join('\n');
 }
 
-function normalizeGoalLiteDraft(value) {
-    let draft = removeReasoningFromString(String(value || '')).trim();
-    draft = draft.replace(/^(?:用户|USER|U|{{user}})\s*[:：]\s*/i, '').trim();
-    draft = draft.replace(/\s*\n+\s*/g, ' ');
-    if ((draft.startsWith('“') && draft.endsWith('”')) || (draft.startsWith('"') && draft.endsWith('"'))) {
-        draft = draft.slice(1, -1).trim();
-    }
-    return Array.from(draft).slice(0, 100).join('').trim();
-}
-
 async function runGoalAction(actionSettings, previewPrompt = '') {
     if (goalActionRunning) {
         toastr.warning('A Goal action is already running.', 'CC Goal');
@@ -941,10 +930,9 @@ async function runGoalAction(actionSettings, previewPrompt = '') {
             const raw = await context.generateRaw({
                 prompt: recentTranscript,
                 systemPrompt: GOAL_LITE_SYSTEM_PROMPT,
-                responseLength: GOAL_LITE_RESPONSE_TOKENS,
                 trimNames: true,
             });
-            draft = normalizeGoalLiteDraft(raw);
+            draft = String(raw || '').trim();
             if (!draft) throw new Error('Custom impersonate returned an empty message.');
         } else {
             throw new Error(`Unknown Goal mode: ${mode}`);
@@ -1003,7 +991,7 @@ function openGoalPopup() {
                 </label>
                 <label class="cc-goal-mode-card">
                     <input type="radio" name="cc-goal-mode" value="custom">
-                    <span><b>CC impersonate</b><small>One low-token request for a reply under 100 characters.</small></span>
+                    <span><b>CC impersonate</b><small>One low-token request using only recent conversation context.</small></span>
                 </label>
             </div>
 
@@ -1027,8 +1015,8 @@ function openGoalPopup() {
 
             <section class="cc-goal-mode-panel" data-goal-panel="custom">
                 <b>Lightweight CC impersonate</b>
-                <p>Uses only a small recent-chat excerpt and one lightweight request, then returns a directly usable reply of no more than 100 characters.</p>
-                <small class="compact-muted">Fixed for low token use: up to 800 input characters and 128 response tokens.</small>
+                <p>Uses only a small recent-chat excerpt and one lightweight request, then uses the returned response content directly.</p>
+                <small class="compact-muted">Input is capped at 800 characters. Reasoning and response length use the active SillyTavern/model settings without truncation.</small>
             </section>
 
             <label class="checkbox_label cc-goal-auto-send" for="cc-goal-auto-send">
