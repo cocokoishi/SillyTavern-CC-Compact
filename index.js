@@ -25,6 +25,7 @@ const DEFAULT_GOAL_SETTINGS = Object.freeze({
     customGuidance: '',
     disableReasoning: false,
     autoSend: true,
+    maxRounds: 0,
 });
 
 const DEFAULT_PROMPT = `Create a dense story-continuity memory from the omitted SillyTavern roleplay transcript.
@@ -94,10 +95,15 @@ function clampNumber(value, min, max, fallback) {
 
 function debounce(fn, delay = 350) {
     let timer = null;
-    return (...args) => {
+    const debounced = (...args) => {
         clearTimeout(timer);
         timer = setTimeout(() => fn(...args), delay);
     };
+    debounced.cancel = () => {
+        clearTimeout(timer);
+        timer = null;
+    };
+    return debounced;
 }
 
 function showTaskNotice(title, message, { onStop = null } = {}) {
@@ -917,13 +923,33 @@ async function sendGoalComposerText() {
     }
     sendButton.click();
 
-    // The click handler starts Generate() asynchronously. Wait until the
-    // generation lock clears before allowing the next Goal round to begin.
+    // The click handler starts Generate() asynchronously. Its generation
+    // interceptor may compact first, before SillyTavern sets dataset.generating.
+    // Wait for the generation lock to appear and then clear before starting the
+    // next Goal round, so automatic compaction cannot overlap Goal requests.
     const startedAt = Date.now();
-    while (document.body.dataset.generating !== 'true' && Date.now() - startedAt < 1500) {
+    const hardStartDeadline = startedAt + 30 * 60 * 1000;
+    let startDeadline = startedAt + 30 * 1000;
+    let sawGenerating = false;
+    while (Date.now() < hardStartDeadline) {
+        const generating = document.body.dataset.generating === 'true';
+        sawGenerating ||= generating;
+        if (goalStopRequested) {
+            if (generating) SillyTavern.getContext().stopGeneration?.();
+            return;
+        }
+        if (sawGenerating && !generating && !inCompaction) return;
+        if (!sawGenerating && inCompaction) {
+            // A slow local model may need several minutes for the automatic
+            // compact pass. Give Generate a fresh grace period after it ends.
+            startDeadline = Math.min(hardStartDeadline, Date.now() + 30 * 1000);
+        }
+        if (!sawGenerating && !inCompaction && Date.now() >= startDeadline) break;
         await new Promise(resolve => setTimeout(resolve, 50));
     }
-    if (document.body.dataset.generating !== 'true') return;
+    if (!sawGenerating) {
+        throw new Error('SillyTavern did not start the character reply. The Goal loop was stopped.');
+    }
 
     let stopIssued = false;
     while (document.body.dataset.generating === 'true') {
@@ -1056,18 +1082,19 @@ async function runGoalLoop(actionSettings, previewPrompt = '') {
     goalActionRunning = true;
     goalStopRequested = false;
     let rounds = 0;
+    const maxRounds = clampNumber(actionSettings.maxRounds, 0, 100000, 0);
     const taskNotice = showTaskNotice(
         'CC Goal',
-        'Starting continuous Goal loop…',
+        maxRounds > 0 ? `Starting Goal loop · ${maxRounds} round${maxRounds === 1 ? '' : 's'}…` : 'Starting continuous Goal loop…',
         { onStop: requestGoalStop },
     );
 
     try {
-        while (!goalStopRequested) {
-            rounds++;
+        while (!goalStopRequested && (maxRounds === 0 || rounds < maxRounds)) {
             const result = await runGoalRound(actionSettings, previewPrompt, taskNotice);
             previewPrompt = '';
             if (!result?.success || result?.stopped) break;
+            rounds++;
             if (!actionSettings.autoSend) {
                 taskNotice.update(`Round ${rounds} complete · draft replaced in input; click Stop to finish.`);
             }
@@ -1085,6 +1112,8 @@ async function runGoalLoop(actionSettings, previewPrompt = '') {
         goalStopRequested = false;
         if (stopped) {
             toastr.info(`Goal stopped after ${rounds} round${rounds === 1 ? '' : 's'}.`, 'CC Goal');
+        } else if (maxRounds > 0 && rounds >= maxRounds) {
+            toastr.success(`Goal completed ${rounds} round${rounds === 1 ? '' : 's'}.`, 'CC Goal');
         }
     }
 }
@@ -1169,6 +1198,11 @@ function openGoalPopup() {
             </label>
             <small class="compact-muted">If disabled, the selected/generated message is left in the input box for editing.</small>
 
+            <label class="cc-goal-rounds-option" for="cc-goal-max-rounds">
+                <span><b>Rounds</b><small>0 = unlimited (default)</small></span>
+                <input id="cc-goal-max-rounds" class="text_pole" type="number" min="0" max="100000" step="1" placeholder="0">
+            </label>
+
             <div class="cc-goal-run-row">
                 <button id="cc-goal-stop" class="menu_button" type="button">Stop Goal</button>
                 <button id="cc-goal-run" class="menu_button menu_button_icon" type="button">
@@ -1180,7 +1214,11 @@ function openGoalPopup() {
         </div>
     `);
     const content = overlay.find('.cc-goal-panel');
+    let persistUi = null;
+    let persistUiDebounced = null;
     const closeGoalPopup = () => {
+        persistUiDebounced?.cancel?.();
+        persistUi?.();
         $(document).off('keydown.ccGoal');
         overlay.remove();
         if (activeGoalPopup === overlay[0]) activeGoalPopup = null;
@@ -1193,6 +1231,7 @@ function openGoalPopup() {
     content.find('#cc-goal-custom-guidance').val(settings.customGuidance);
     content.find('#cc-goal-disable-reasoning').prop('checked', Boolean(settings.disableReasoning));
     content.find('#cc-goal-auto-send').prop('checked', Boolean(settings.autoSend));
+    content.find('#cc-goal-max-rounds').val(settings.maxRounds);
 
     const refreshPromptCount = () => {
         const count = parseGoalPrompts(content.find('#cc-goal-random-prompts').val()).length;
@@ -1209,7 +1248,7 @@ function openGoalPopup() {
         content.find('#cc-goal-run span').text(labels[mode]);
         content.find('#cc-goal-stop').prop('disabled', !goalActionRunning);
     };
-    const persistUi = () => {
+    persistUi = () => {
         const goal = getGoalSettings();
         goal.mode = String(content.find('input[name="cc-goal-mode"]:checked').val() || 'random');
         goal.randomPrompts = String(content.find('#cc-goal-random-prompts').val() || '');
@@ -1217,9 +1256,10 @@ function openGoalPopup() {
         goal.customGuidance = String(content.find('#cc-goal-custom-guidance').val() || '');
         goal.disableReasoning = Boolean(content.find('#cc-goal-disable-reasoning').prop('checked'));
         goal.autoSend = Boolean(content.find('#cc-goal-auto-send').prop('checked'));
+        goal.maxRounds = clampNumber(content.find('#cc-goal-max-rounds').val(), 0, 100000, 0);
         SillyTavern.getContext().saveSettingsDebounced();
     };
-    const persistUiDebounced = debounce(persistUi, 350);
+    persistUiDebounced = debounce(persistUi, 350);
 
     content.find('input[name="cc-goal-mode"]').on('change', () => {
         refreshMode();
@@ -1234,6 +1274,7 @@ function openGoalPopup() {
     content.find('#cc-goal-custom-guidance').on('input', persistUiDebounced);
     content.find('#cc-goal-disable-reasoning').on('change', persistUi);
     content.find('#cc-goal-auto-send').on('change', persistUi);
+    content.find('#cc-goal-max-rounds').on('input', persistUiDebounced).on('change', persistUi);
     content.find('#cc-goal-preview-button').on('click', () => {
         const prompts = parseGoalPrompts(content.find('#cc-goal-random-prompts').val());
         if (!prompts.length) {

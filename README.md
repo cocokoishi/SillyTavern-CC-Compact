@@ -1,6 +1,6 @@
 # CC Compact for SillyTavern
 
-> **v1.5.0:** adds persistent user guidance to CC impersonate and makes `/goal` a serial continuous loop that runs until **Stop Goal** or `/goal stop`, while keeping the persistent reasoning toggle and non-modal status UI.
+> **v1.6.0:** adds a persistent Goal round limit (`0` = unlimited) to the serial continuous loop, alongside user guidance, the reasoning toggle, and non-modal status UI.
 
 
 A Claude Code-style context compaction extension for SillyTavern, adapted for long SillyTavern sessions.
@@ -90,7 +90,7 @@ compacts immediately and ignores the automatic percentage trigger. If the conver
 
 ## Goal
 
-Type `/goal` to open a three-mode interface. Its selected mode, random prompt library, native impersonate instruction, and auto-send preference are stored in SillyTavern extension settings and survive reloads.
+Type `/goal` to open a three-mode interface. Its selected mode, prompt library/instructions, auto-send preference, and round limit are stored in SillyTavern extension settings and survive reloads.
 
 - **Random prompt** picks one non-empty line from the saved prompt library. It avoids immediately repeating the previous prompt when alternatives exist.
 - **SillyTavern impersonate** calls the native `Generate('impersonate')` path, so it uses the active character, lore, prompt formatting, and normal SillyTavern impersonation behavior.
@@ -98,7 +98,7 @@ Type `/goal` to open a three-mode interface. Its selected mode, random prompt li
 
 The independent **Disable reasoning for impersonate requests** option is persisted with Goal settings. When enabled, Compact temporarily requests `reasoning_effort=none` and disables returned thoughts/reasoning for native and CC impersonate calls, then restores the original SillyTavern settings after the request. Unsupported backends may ignore this option.
 
-Press **Run Goal** to start a serial loop. Each round creates the next user message, sends it when **Send immediately** is enabled, waits for the character reply to finish, and only then starts the next round. It continues until **Stop Goal** is clicked or `/goal stop` is entered. If **Send immediately** is disabled, each round replaces the draft in the input box; use **Stop Goal** to end the loop and edit the final draft.
+Press **Run Goal** to start a serial loop. Each round creates the next user message, sends it when **Send immediately** is enabled, waits for the character reply to finish, and only then starts the next round. **Rounds** defaults to `0` (unlimited); a positive value stops automatically after that many completed rounds. It can also be stopped early with **Stop Goal** or `/goal stop`. If **Send immediately** is disabled, each round replaces the draft in the input box; use **Stop Goal** to end the loop and edit the final draft.
 
 Goal uses a non-modal floating panel. Compaction and Goal requests show only a compact status notice, so the rest of SillyTavern stays operable while work is running.
 

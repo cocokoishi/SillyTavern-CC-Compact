@@ -259,6 +259,28 @@
     margin-top: 0.1rem;
 }
 
+.cc-goal-rounds-option {
+    display: flex;
+    gap: 0.7rem;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 18rem;
+}
+
+.cc-goal-rounds-option span {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.cc-goal-rounds-option small {
+    opacity: 0.72;
+}
+
+.cc-goal-rounds-option input {
+    width: 6rem;
+}
+
 .cc-goal-reasoning-option span {
     display: flex;
     flex-direction: column;
